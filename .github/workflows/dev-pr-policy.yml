@@ -27,7 +27,7 @@ jobs:
             exit 0
           fi
 
-          if [[ "${HEAD_REF}" =~ ^(feature|feat|fix|bugfix|hotfix|chore|docs|refactor|perf|test|ci|build|style|release)/[a-z0-9._/-]+$ ]]; then
+          if [[ "${HEAD_REF}" =~ ^(feature|feat|fix|bugfix|hotfix|chore|docs|refactor|perf|test|ci|build|style|release)/[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$ ]]; then
             echo "Branch name allowed: ${HEAD_REF}"
             exit 0
           fi
