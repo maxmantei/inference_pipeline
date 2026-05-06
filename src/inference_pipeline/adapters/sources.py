@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from types import TracebackType
 from typing import Self
 
-from inference_pipeline import BufferQ
+from inference_pipeline.buffer import BufferQ
 from inference_pipeline.runtime import ThreadTask
 
 
