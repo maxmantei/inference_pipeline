@@ -1,0 +1,33 @@
+[project]
+name = "inference-pipeline"
+version = "0.1.0"
+description = "Utilities for ML/DL threaded pipelines in inference services."
+readme = "README.md"
+authors = [
+    { name = "Max Mantei", email = "max.mantei@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.11.10,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.20.2",
+    "pre-commit>=4.3.0",
+    "pytest>=9.0.3",
+]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
