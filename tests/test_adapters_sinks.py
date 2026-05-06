@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import threading
+import time
+from collections.abc import Callable
 
 import pytest
 
@@ -45,6 +47,65 @@ class _FailingSink(ManagedSinkAdapter[int]):
         self.items.append(item)
 
 
+class _FailingStopSink(ManagedSinkAdapter[int]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    def _start_impl(self) -> None:
+        self.start_calls += 1
+
+    def _stop_impl(self) -> None:
+        self.stop_calls += 1
+        raise RuntimeError("stop failed")
+
+    def consume(self, item: int) -> None:
+        return
+
+
+class _FailingStartSink(ManagedSinkAdapter[int]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_calls = 0
+
+    def _start_impl(self) -> None:
+        self.start_calls += 1
+        raise RuntimeError("start failed")
+
+    def consume(self, item: int) -> None:
+        return
+
+
+class _BlockingStartSink(ManagedSinkAdapter[int]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.entered_start = threading.Event()
+        self.release_start = threading.Event()
+
+    def _start_impl(self) -> None:
+        self.start_calls += 1
+        self.entered_start.set()
+        self.release_start.wait(timeout=1.0)
+
+    def _stop_impl(self) -> None:
+        self.stop_calls += 1
+
+    def consume(self, item: int) -> None:
+        return
+
+
+def wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.001)
+    return predicate()
+
+
 def _queue_with(values: list[int]) -> BufferQ[int]:
     q: BufferQ[int] = BufferQ(maxsize=max(len(values), 1), default_timeout=0.01)
     for value in values:
@@ -71,6 +132,59 @@ def test_managed_sink_start_stop_are_idempotent() -> None:
     sink.stop()
     assert sink.running is False
     assert sink.stop_calls == 1
+
+
+def test_managed_sink_concurrent_start_calls_start_once() -> None:
+    sink = _BlockingStartSink()
+
+    first = threading.Thread(target=sink.start, daemon=True)
+    second = threading.Thread(target=sink.start, daemon=True)
+
+    first.start()
+    assert sink.entered_start.wait(timeout=1.0)
+    second.start()
+    sink.release_start.set()
+
+    first.join(timeout=1.0)
+    second.join(timeout=1.0)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert sink.start_calls == 1
+    assert sink.running is True
+
+    sink.stop()
+    assert sink.stop_calls == 1
+
+
+def test_managed_sink_stop_during_startup_is_not_lost() -> None:
+    sink = _BlockingStartSink()
+
+    start_thread = threading.Thread(target=sink.start, daemon=True)
+    stop_thread = threading.Thread(target=sink.stop, daemon=True)
+
+    start_thread.start()
+    assert sink.entered_start.wait(timeout=1.0)
+    stop_thread.start()
+    sink.release_start.set()
+
+    start_thread.join(timeout=1.0)
+    stop_thread.join(timeout=1.0)
+
+    assert not start_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert sink.start_calls == 1
+    assert sink.stop_calls == 1
+    assert sink.running is False
+
+
+def test_managed_sink_start_failure_rolls_back_running_state() -> None:
+    sink = _FailingStartSink()
+
+    with pytest.raises(RuntimeError, match="start failed"):
+        sink.start()
+
+    assert sink.running is False
 
 
 def test_managed_sink_run_consumes_until_input_closes() -> None:
@@ -106,7 +220,32 @@ def test_managed_sink_run_uses_internal_shutdown_when_no_stop_provided() -> None
     thread = threading.Thread(target=lambda: sink.run(q), daemon=True)
     thread.start()
     try:
-        assert sink.running is True
+        assert wait_until(lambda: sink.running)
+        sink.stop()
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+    finally:
+        sink.stop()
+        q.close()
+        thread.join(timeout=1.0)
+
+    assert sink.start_calls == 1
+    assert sink.stop_calls == 1
+    assert sink.running is False
+
+
+def test_managed_sink_run_stops_on_internal_shutdown_with_external_stop() -> None:
+    sink = _CollectingSink()
+    external_stop = threading.Event()
+    q: BufferQ[int] = BufferQ(maxsize=4, default_timeout=0.01)
+
+    thread = threading.Thread(
+        target=lambda: sink.run(q, stop=external_stop),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert wait_until(lambda: sink.running)
         sink.stop()
         thread.join(timeout=1.0)
         assert not thread.is_alive()
@@ -131,6 +270,16 @@ def test_managed_sink_run_propagates_consume_error_and_stops() -> None:
     assert sink.start_calls == 1
     assert sink.stop_calls == 1
     assert sink.running is False
+
+
+def test_sink_context_manager_preserves_body_exception_if_stop_fails() -> None:
+    sink = _FailingStopSink()
+
+    with pytest.raises(ValueError, match="body failed"):
+        with sink:
+            raise ValueError("body failed")
+
+    assert sink.stop_calls == 1
 
 
 def test_managed_sink_threaded_runs_to_completion() -> None:

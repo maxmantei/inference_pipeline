@@ -33,7 +33,11 @@ class SourceAdapter[T](ABC):
 
     @abstractmethod
     def stop(self) -> None:
-        """Stop source acquisition/production and close the output queue."""
+        """Stop source acquisition/production.
+
+        Implementations may treat ``stop()`` before ``start()`` as a no-op.
+        Managed implementations close output when stopping a running source.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -64,12 +68,26 @@ class SourceAdapter[T](ABC):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        """Stop the source when leaving a context."""
+        """Stop the source when leaving a context.
+
+        If the context body already raised, source shutdown errors are ignored
+        so the original exception is preserved.
+        """
+        if exc_type is not None:
+            try:
+                self.stop()
+            except BaseException:
+                return
+            return
         self.stop()
 
 
 class ManagedSourceAdapter[T](SourceAdapter[T], ABC):
-    """Reusable base for source lifecycle and producer-style orchestration."""
+    """Reusable base for source lifecycle and producer-style orchestration.
+
+    A managed source is single-use: once stopped, its output queue is closed and
+    restarting is forbidden. Create a new adapter instance to start again.
+    """
 
     def __init__(
         self,
@@ -80,12 +98,16 @@ class ManagedSourceAdapter[T](SourceAdapter[T], ABC):
         """Create a managed source with a bounded output queue."""
         self._output = BufferQ[T](maxsize=out_maxsize, default_timeout=out_timeout)
         self._state_lock = threading.RLock()
+        self._lifecycle_lock = threading.Lock()
         self._running = False
         self._shutdown_event = threading.Event()
 
     @property
     def output(self) -> BufferQ[T]:
-        """Return this source's output queue."""
+        """Return this source's output queue.
+
+        The queue is closed permanently on stop; restarting is not supported.
+        """
         return self._output
 
     @property
@@ -95,14 +117,29 @@ class ManagedSourceAdapter[T](SourceAdapter[T], ABC):
             return self._running
 
     def start(self) -> None:
-        """Start the source once; repeated calls are no-ops."""
-        with self._state_lock:
-            if self._running:
-                return
-            self._shutdown_event.clear()
-        self._start_impl()
-        with self._state_lock:
-            self._running = True
+        """Start the source once; repeated calls while running are no-ops.
+
+        Startup is lifecycle-serialized so concurrent ``start()`` and ``stop()``
+        calls cannot overlap. Restart after stop is forbidden.
+        """
+        with self._lifecycle_lock:
+            with self._state_lock:
+                if self._running:
+                    return
+                if self._output.closed:
+                    raise RuntimeError(
+                        "Cannot restart a stopped source adapter; "
+                        "create a new adapter instance."
+                    )
+                self._running = True
+                self._shutdown_event.clear()
+            try:
+                self._start_impl()
+            except BaseException:
+                with self._state_lock:
+                    self._running = False
+                    self._shutdown_event.set()
+                raise
 
     def stop(self) -> None:
         """Stop the source once; repeated calls are no-ops.
@@ -110,15 +147,16 @@ class ManagedSourceAdapter[T](SourceAdapter[T], ABC):
         Calling ``stop()`` before ``start()`` is also a no-op so callers can
         run cleanup code unconditionally in shutdown paths.
         """
-        with self._state_lock:
-            if not self._running:
-                return
-            self._running = False
-            self._shutdown_event.set()
-        try:
-            self._stop_impl()
-        finally:
-            self._output.close()
+        with self._lifecycle_lock:
+            with self._state_lock:
+                if not self._running:
+                    return
+                self._running = False
+                self._shutdown_event.set()
+            try:
+                self._stop_impl()
+            finally:
+                self._output.close()
 
     def run(self, stop: threading.Event | None = None) -> None:
         """Run source lifecycle in blocking mode until stop is requested.

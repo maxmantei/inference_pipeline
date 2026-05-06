@@ -20,7 +20,7 @@ repos:
 
       - id: ruff-check
         name: ruff check (src/tests)
-        entry: uv run ruff check
+        entry: uv run ruff check src tests --fix
         language: system
         files: ^(src|tests)/.*\.pyi?$
 
