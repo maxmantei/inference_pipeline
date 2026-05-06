@@ -26,7 +26,7 @@ repos:
 
       - id: mypy
         name: mypy
-        entry: uv run mypy
+        entry: uv run mypy src tests
         language: system
         pass_filenames: false
         stages: [pre-push]
