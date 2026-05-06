@@ -103,7 +103,7 @@ class ManagedSinkAdapter[T](SinkAdapter[T], ABC):
         self._stop_impl()
 
     def run(self, input_q: BufferQ[T], stop: threading.Event | None = None) -> None:
-        """Run sink lifecycle in blocking mode until input closes or stop is requested."""
+        """Run sink lifecycle until input closes or a stop signal is set."""
         effective_stop = stop if stop is not None else self._shutdown_event
         with self:
             for item in input_q.iter_until_closed(stop=effective_stop):

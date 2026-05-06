@@ -105,7 +105,11 @@ class ManagedSourceAdapter[T](SourceAdapter[T], ABC):
             self._running = True
 
     def stop(self) -> None:
-        """Stop the source once; repeated calls are no-ops."""
+        """Stop the source once; repeated calls are no-ops.
+
+        Calling ``stop()`` before ``start()`` is also a no-op so callers can
+        run cleanup code unconditionally in shutdown paths.
+        """
         with self._state_lock:
             if not self._running:
                 return
