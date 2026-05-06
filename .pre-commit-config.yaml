@@ -14,13 +14,13 @@ repos:
     hooks:
       - id: ruff-format
         name: ruff format (src/tests)
-        entry: uvx ruff format
+        entry: uv run ruff format
         language: system
         files: ^(src|tests)/.*\.pyi?$
 
       - id: ruff-check
         name: ruff check (src/tests)
-        entry: uvx ruff check
+        entry: uv run ruff check
         language: system
         files: ^(src|tests)/.*\.pyi?$
 

@@ -1,0 +1,41 @@
+name: Dev PR Policy
+
+on:
+  pull_request:
+    branches:
+      - dev
+
+jobs:
+  branch-naming:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate source branch naming
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${HEAD_REF}" ]]; then
+            echo "Unable to determine source branch name."
+            exit 1
+          fi
+
+          if [[ "${HEAD_REF}" =~ ^(dependabot|renovate)/ ]]; then
+            echo "Bot branch allowed: ${HEAD_REF}"
+            exit 0
+          fi
+
+          if [[ "${HEAD_REF}" =~ ^(feature|feat|fix|bugfix|hotfix|chore|docs|refactor|perf|test|ci|build|style|release)/[a-z0-9._/-]+$ ]]; then
+            echo "Branch name allowed: ${HEAD_REF}"
+            exit 0
+          fi
+
+          echo "Branch '${HEAD_REF}' is not allowed for PRs into dev."
+          echo "Use a conventional prefix, for example:"
+          echo "- feat/<name>"
+          echo "- fix/<name>"
+          echo "- chore/<name>"
+          echo "- refactor/<name>"
+          exit 1

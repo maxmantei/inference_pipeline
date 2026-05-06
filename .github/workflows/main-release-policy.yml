@@ -1,0 +1,77 @@
+name: Main Release Policy
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  release-policy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+          path: base
+
+      - name: Checkout head branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          path: head
+
+      - name: Advisory on release source branch
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          if [[ "${HEAD_REF}" == "dev" || "${HEAD_REF}" =~ ^release/ ]]; then
+            echo "Recommended release source branch: ${HEAD_REF}"
+          else
+            echo "::notice::PR to main from '${HEAD_REF}'. Recommended sources are 'dev' or 'release/*'."
+          fi
+
+      - name: Validate version bump
+        run: |
+          set -euo pipefail
+          base_version=$(python - <<'PY'
+          import pathlib
+          import re
+
+          text = pathlib.Path("base/pyproject.toml").read_text(encoding="utf-8")
+          match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+          if not match:
+              raise SystemExit("Could not find version in base/pyproject.toml")
+          print(match.group(1))
+          PY
+          )
+          head_version=$(python - <<'PY'
+          import pathlib
+          import re
+
+          text = pathlib.Path("head/pyproject.toml").read_text(encoding="utf-8")
+          match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+          if not match:
+              raise SystemExit("Could not find version in head/pyproject.toml")
+          print(match.group(1))
+          PY
+          )
+
+          if [[ "${base_version}" == "${head_version}" ]]; then
+            echo "Version was not bumped."
+            echo "Base: ${base_version}"
+            echo "Head: ${head_version}"
+            exit 1
+          fi
+
+          highest_version=$(printf '%s\n%s\n' "${base_version}" "${head_version}" | sort -V | tail -n 1)
+          if [[ "${highest_version}" != "${head_version}" ]]; then
+            echo "Version must increase. Base=${base_version}, Head=${head_version}"
+            exit 1
+          fi
+
+          echo "Version bump validated: ${base_version} -> ${head_version}"
