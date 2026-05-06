@@ -108,13 +108,17 @@ def test_producer_like_runtime_behavior() -> None:
 
 
 def test_consumer_like_runtime_behavior() -> None:
-    consumer: ConsumerLike[int] = _ConsumerImpl()
+    consumer: _ConsumerImpl = _ConsumerImpl()
+
+    def _use_consumer(consumer: ConsumerLike[int], q: BufferQ[int]) -> None:
+        consumer.run(q)
+
     q: BufferQ[int] = BufferQ(maxsize=4, default_timeout=0.01)
     q.put(10)
     q.put(20)
     q.close()
 
-    consumer.run(q)
+    _use_consumer(consumer, q)
 
     assert consumer.items == [10, 20]
 
