@@ -1,0 +1,156 @@
+"""Abstract source-adapter interfaces for queue-based pipeline ingestion."""
+
+from __future__ import annotations
+
+import threading
+from abc import ABC, abstractmethod
+from types import TracebackType
+from typing import Self
+
+from inference_pipeline import BufferQ
+from inference_pipeline.runtime import ThreadTask
+
+
+class SourceAdapter[T](ABC):
+    """Interface for start/stop managed sources that publish to a BufferQ."""
+
+    @property
+    @abstractmethod
+    def output(self) -> BufferQ[T]:
+        """Return the output queue that downstream stages consume from."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def running(self) -> bool:
+        """Return whether the source is currently running."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def start(self) -> None:
+        """Start source acquisition/production."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def stop(self) -> None:
+        """Stop source acquisition/production and close the output queue."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def run(self, stop: threading.Event | None = None) -> None:
+        """Run source lifecycle in blocking mode until an optional stop signal."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def threaded(
+        self,
+        *,
+        stop: threading.Event | None = None,
+        name: str | None = None,
+        daemon: bool = True,
+        join_timeout: float = 5.0,
+    ) -> ThreadTask:
+        """Return a ``ThreadTask`` that runs this source in a worker thread."""
+        raise NotImplementedError
+
+    def __enter__(self) -> Self:
+        """Start the source in context-manager usage."""
+        self.start()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Stop the source when leaving a context."""
+        self.stop()
+
+
+class ManagedSourceAdapter[T](SourceAdapter[T], ABC):
+    """Reusable base for source lifecycle and producer-style orchestration."""
+
+    def __init__(
+        self,
+        *,
+        out_maxsize: int,
+        out_timeout: float = 0.5,
+    ) -> None:
+        """Create a managed source with a bounded output queue."""
+        self._output = BufferQ[T](maxsize=out_maxsize, default_timeout=out_timeout)
+        self._state_lock = threading.RLock()
+        self._running = False
+        self._shutdown_event = threading.Event()
+
+    @property
+    def output(self) -> BufferQ[T]:
+        """Return this source's output queue."""
+        return self._output
+
+    @property
+    def running(self) -> bool:
+        """Return whether the source has been started and not yet stopped."""
+        with self._state_lock:
+            return self._running
+
+    def start(self) -> None:
+        """Start the source once; repeated calls are no-ops."""
+        with self._state_lock:
+            if self._running:
+                return
+            self._shutdown_event.clear()
+        self._start_impl()
+        with self._state_lock:
+            self._running = True
+
+    def stop(self) -> None:
+        """Stop the source once; repeated calls are no-ops."""
+        with self._state_lock:
+            if not self._running:
+                return
+            self._running = False
+            self._shutdown_event.set()
+        try:
+            self._stop_impl()
+        finally:
+            self._output.close()
+
+    def run(self, stop: threading.Event | None = None) -> None:
+        """Run source lifecycle in blocking mode until stop is requested.
+
+        The method enters source context management and blocks until either the
+        external ``stop`` event is set or this adapter begins shutting down.
+        """
+        with self:
+            while True:
+                if self._shutdown_event.wait(timeout=0.1):
+                    return
+                if stop is not None and stop.is_set():
+                    return
+
+    def threaded(
+        self,
+        *,
+        stop: threading.Event | None = None,
+        name: str | None = None,
+        daemon: bool = True,
+        join_timeout: float = 5.0,
+    ) -> ThreadTask:
+        """Return a ``ThreadTask`` that runs this source in a worker thread."""
+        return ThreadTask.from_runner(
+            lambda: self.run(stop=stop),
+            thread_name=name or f"{type(self).__name__}-worker",
+            daemon=daemon,
+            join_timeout=join_timeout,
+        )
+
+    @abstractmethod
+    def _start_impl(self) -> None:
+        """Subclass hook containing concrete startup logic."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def _stop_impl(self) -> None:
+        """Subclass hook containing concrete teardown logic."""
+        raise NotImplementedError
