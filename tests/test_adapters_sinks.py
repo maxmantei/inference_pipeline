@@ -3,16 +3,18 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import pytest
 
 from inference_pipeline.adapters.sinks import ManagedSinkAdapter
 from inference_pipeline.buffer import BufferQ
+from inference_pipeline.configs import BaseConsumerConfig
 
 
-class _CollectingSink(ManagedSinkAdapter[int]):
-    def __init__(self) -> None:
-        super().__init__()
+class _CollectingSink(ManagedSinkAdapter[int, BaseConsumerConfig]):
+    def __init__(self, config: BaseConsumerConfig) -> None:
+        super().__init__(config=config)
         self.start_calls = 0
         self.stop_calls = 0
         self.items: list[int] = []
@@ -27,10 +29,15 @@ class _CollectingSink(ManagedSinkAdapter[int]):
         self.items.append(item)
 
 
-class _FailingSink(ManagedSinkAdapter[int]):
-    def __init__(self, fail_on: int) -> None:
-        super().__init__()
-        self.fail_on = fail_on
+@dataclass(frozen=True, kw_only=True, slots=True)
+class _FailingSinkConfig(BaseConsumerConfig):
+    fail_on: int
+
+
+class _FailingSink(ManagedSinkAdapter[int, _FailingSinkConfig]):
+    def __init__(self, config: _FailingSinkConfig) -> None:
+        super().__init__(config=config)
+        self.fail_on = config.fail_on
         self.start_calls = 0
         self.stop_calls = 0
         self.items: list[int] = []
@@ -47,9 +54,9 @@ class _FailingSink(ManagedSinkAdapter[int]):
         self.items.append(item)
 
 
-class _FailingStopSink(ManagedSinkAdapter[int]):
-    def __init__(self) -> None:
-        super().__init__()
+class _FailingStopSink(ManagedSinkAdapter[int, BaseConsumerConfig]):
+    def __init__(self, config: BaseConsumerConfig) -> None:
+        super().__init__(config=config)
         self.start_calls = 0
         self.stop_calls = 0
 
@@ -64,9 +71,9 @@ class _FailingStopSink(ManagedSinkAdapter[int]):
         return
 
 
-class _FailingStartSink(ManagedSinkAdapter[int]):
-    def __init__(self) -> None:
-        super().__init__()
+class _FailingStartSink(ManagedSinkAdapter[int, BaseConsumerConfig]):
+    def __init__(self, config: BaseConsumerConfig) -> None:
+        super().__init__(config=config)
         self.start_calls = 0
 
     def _start_impl(self) -> None:
@@ -77,9 +84,9 @@ class _FailingStartSink(ManagedSinkAdapter[int]):
         return
 
 
-class _BlockingStartSink(ManagedSinkAdapter[int]):
-    def __init__(self) -> None:
-        super().__init__()
+class _BlockingStartSink(ManagedSinkAdapter[int, BaseConsumerConfig]):
+    def __init__(self, config: BaseConsumerConfig) -> None:
+        super().__init__(config=config)
         self.start_calls = 0
         self.stop_calls = 0
         self.entered_start = threading.Event()
@@ -115,13 +122,13 @@ def _queue_with(values: list[int]) -> BufferQ[int]:
 
 
 def test_managed_sink_initial_state() -> None:
-    sink = _CollectingSink()
+    sink = _CollectingSink(BaseConsumerConfig())
 
     assert sink.running is False
 
 
 def test_managed_sink_start_stop_are_idempotent() -> None:
-    sink = _CollectingSink()
+    sink = _CollectingSink(BaseConsumerConfig())
 
     sink.start()
     sink.start()
@@ -135,7 +142,7 @@ def test_managed_sink_start_stop_are_idempotent() -> None:
 
 
 def test_managed_sink_concurrent_start_calls_start_once() -> None:
-    sink = _BlockingStartSink()
+    sink = _BlockingStartSink(BaseConsumerConfig())
 
     first = threading.Thread(target=sink.start, daemon=True)
     second = threading.Thread(target=sink.start, daemon=True)
@@ -158,7 +165,7 @@ def test_managed_sink_concurrent_start_calls_start_once() -> None:
 
 
 def test_managed_sink_stop_during_startup_is_not_lost() -> None:
-    sink = _BlockingStartSink()
+    sink = _BlockingStartSink(BaseConsumerConfig())
 
     start_thread = threading.Thread(target=sink.start, daemon=True)
     stop_thread = threading.Thread(target=sink.stop, daemon=True)
@@ -179,7 +186,7 @@ def test_managed_sink_stop_during_startup_is_not_lost() -> None:
 
 
 def test_managed_sink_start_failure_rolls_back_running_state() -> None:
-    sink = _FailingStartSink()
+    sink = _FailingStartSink(BaseConsumerConfig())
 
     with pytest.raises(RuntimeError, match="start failed"):
         sink.start()
@@ -188,7 +195,7 @@ def test_managed_sink_start_failure_rolls_back_running_state() -> None:
 
 
 def test_managed_sink_run_consumes_until_input_closes() -> None:
-    sink = _CollectingSink()
+    sink = _CollectingSink(BaseConsumerConfig())
     q = _queue_with([1, 2, 3])
 
     sink.run(q)
@@ -200,7 +207,7 @@ def test_managed_sink_run_consumes_until_input_closes() -> None:
 
 
 def test_managed_sink_run_respects_external_stop_event_when_set() -> None:
-    sink = _CollectingSink()
+    sink = _CollectingSink(BaseConsumerConfig())
     q = _queue_with([10, 20, 30])
     stop = threading.Event()
     stop.set()
@@ -214,7 +221,7 @@ def test_managed_sink_run_respects_external_stop_event_when_set() -> None:
 
 
 def test_managed_sink_run_uses_internal_shutdown_when_no_stop_provided() -> None:
-    sink = _CollectingSink()
+    sink = _CollectingSink(BaseConsumerConfig())
     q: BufferQ[int] = BufferQ(maxsize=4, default_timeout=0.01)
 
     thread = threading.Thread(target=lambda: sink.run(q), daemon=True)
@@ -235,7 +242,7 @@ def test_managed_sink_run_uses_internal_shutdown_when_no_stop_provided() -> None
 
 
 def test_managed_sink_run_stops_on_internal_shutdown_with_external_stop() -> None:
-    sink = _CollectingSink()
+    sink = _CollectingSink(BaseConsumerConfig())
     external_stop = threading.Event()
     q: BufferQ[int] = BufferQ(maxsize=4, default_timeout=0.01)
 
@@ -260,7 +267,7 @@ def test_managed_sink_run_stops_on_internal_shutdown_with_external_stop() -> Non
 
 
 def test_managed_sink_run_propagates_consume_error_and_stops() -> None:
-    sink = _FailingSink(fail_on=2)
+    sink = _FailingSink(_FailingSinkConfig(fail_on=2))
     q = _queue_with([1, 2, 3])
 
     with pytest.raises(RuntimeError, match="consume failed"):
@@ -273,7 +280,7 @@ def test_managed_sink_run_propagates_consume_error_and_stops() -> None:
 
 
 def test_sink_context_manager_preserves_body_exception_if_stop_fails() -> None:
-    sink = _FailingStopSink()
+    sink = _FailingStopSink(BaseConsumerConfig())
 
     with pytest.raises(ValueError, match="body failed"):
         with sink:
@@ -283,11 +290,10 @@ def test_sink_context_manager_preserves_body_exception_if_stop_fails() -> None:
 
 
 def test_managed_sink_threaded_runs_to_completion() -> None:
-    sink = _CollectingSink()
+    sink = _CollectingSink(BaseConsumerConfig())
     q = _queue_with([4, 5, 6])
     task = sink.threaded(
         q,
-        name="sink-adapter-worker",
         daemon=False,
         join_timeout=1.0,
     )

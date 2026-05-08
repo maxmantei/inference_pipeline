@@ -262,7 +262,6 @@ class BroadcastLike[T](Protocol):
         input_q: BufferQ[T],
         *,
         stop: threading.Event | None = None,
-        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:

@@ -8,11 +8,15 @@ from types import TracebackType
 from typing import Self
 
 from inference_pipeline.buffer import BufferQ
+from inference_pipeline.protocols import BaseProducerConfigI
 from inference_pipeline.runtime import ThreadTask
 
 
-class SourceAdapter[T](ABC):
+class SourceAdapter[T, ConfT: BaseProducerConfigI](ABC):
     """Interface for start/stop managed sources that publish to a BufferQ."""
+
+    def __init__(self, *, config: ConfT):
+        self.config = config
 
     @property
     @abstractmethod
@@ -82,21 +86,19 @@ class SourceAdapter[T](ABC):
         self.stop()
 
 
-class ManagedSourceAdapter[T](SourceAdapter[T], ABC):
+class ManagedSourceAdapter[T, ConfT: BaseProducerConfigI](SourceAdapter[T, ConfT], ABC):
     """Reusable base for source lifecycle and producer-style orchestration.
 
     A managed source is single-use: once stopped, its output queue is closed and
     restarting is forbidden. Create a new adapter instance to start again.
     """
 
-    def __init__(
-        self,
-        *,
-        out_maxsize: int,
-        out_timeout: float = 0.5,
-    ) -> None:
+    def __init__(self, *, config: ConfT) -> None:
         """Create a managed source with a bounded output queue."""
-        self._output = BufferQ[T](maxsize=out_maxsize, default_timeout=out_timeout)
+        self.config = config
+        self._output = BufferQ[T](
+            maxsize=config.out_maxsize, default_timeout=config.out_timeout
+        )
         self._state_lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
         self._running = False

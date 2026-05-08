@@ -8,6 +8,7 @@ from types import TracebackType
 from typing import Self
 
 from inference_pipeline.buffer import BufferQ
+from inference_pipeline.protocols import BaseConfigI
 from inference_pipeline.runtime import ThreadTask
 
 
@@ -23,8 +24,11 @@ class _OrStopEvent(threading.Event):
         return self._left.is_set() or self._right.is_set()
 
 
-class SinkAdapter[T](ABC):
+class SinkAdapter[T, ConfT: BaseConfigI](ABC):
     """Interface for start/stop managed sinks that consume from a ``BufferQ``."""
+
+    def __init__(self, config: ConfT):
+        self.config = config
 
     @property
     @abstractmethod
@@ -58,7 +62,6 @@ class SinkAdapter[T](ABC):
         input_q: BufferQ[T],
         *,
         stop: threading.Event | None = None,
-        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
@@ -90,15 +93,16 @@ class SinkAdapter[T](ABC):
         self.stop()
 
 
-class ManagedSinkAdapter[T](SinkAdapter[T], ABC):
+class ManagedSinkAdapter[T, ConfT: BaseConfigI](SinkAdapter[T, ConfT], ABC):
     """Reusable base for sink lifecycle and consumer-style orchestration.
 
     Lifecycle operations are serialized so concurrent ``start()`` and ``stop()``
     calls cannot overlap.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, config: ConfT) -> None:
         """Create a managed sink with thread-safe lifecycle state."""
+        self.config = config
         self._state_lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
         self._running = False
@@ -161,14 +165,13 @@ class ManagedSinkAdapter[T](SinkAdapter[T], ABC):
         input_q: BufferQ[T],
         *,
         stop: threading.Event | None = None,
-        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
         """Return a ``ThreadTask`` that runs this sink in a worker thread."""
         return ThreadTask.from_runner(
             lambda: self.run(input_q, stop=stop),
-            thread_name=name or f"{type(self).__name__}-worker",
+            thread_name=f"{self.config.name or type(self).__name__}-worker",
             daemon=daemon,
             join_timeout=join_timeout,
         )
