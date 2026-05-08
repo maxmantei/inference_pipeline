@@ -7,11 +7,17 @@ from collections.abc import Callable
 import pytest
 
 from inference_pipeline.adapters.sources import ManagedSourceAdapter
+from inference_pipeline.configs import BaseProducerConfig
 
 
-class _CountingSource(ManagedSourceAdapter[int]):
-    def __init__(self) -> None:
-        super().__init__(out_maxsize=8, out_timeout=0.01)
+class _CountingSource(ManagedSourceAdapter[int, BaseProducerConfig]):
+    def __init__(
+        self,
+        config: BaseProducerConfig = BaseProducerConfig(
+            out_maxsize=8, out_timeout=0.01
+        ),
+    ) -> None:
+        super().__init__(config=config)
         self.start_calls = 0
         self.stop_calls = 0
 
@@ -22,9 +28,14 @@ class _CountingSource(ManagedSourceAdapter[int]):
         self.stop_calls += 1
 
 
-class _FailingStopSource(ManagedSourceAdapter[int]):
-    def __init__(self) -> None:
-        super().__init__(out_maxsize=8, out_timeout=0.01)
+class _FailingStopSource(ManagedSourceAdapter[int, BaseProducerConfig]):
+    def __init__(
+        self,
+        config: BaseProducerConfig = BaseProducerConfig(
+            out_maxsize=8, out_timeout=0.01
+        ),
+    ) -> None:
+        super().__init__(config=config)
         self.start_calls = 0
         self.stop_calls = 0
 
@@ -36,9 +47,14 @@ class _FailingStopSource(ManagedSourceAdapter[int]):
         raise RuntimeError("stop failed")
 
 
-class _FailingStartSource(ManagedSourceAdapter[int]):
-    def __init__(self) -> None:
-        super().__init__(out_maxsize=8, out_timeout=0.01)
+class _FailingStartSource(ManagedSourceAdapter[int, BaseProducerConfig]):
+    def __init__(
+        self,
+        config: BaseProducerConfig = BaseProducerConfig(
+            out_maxsize=8, out_timeout=0.01
+        ),
+    ) -> None:
+        super().__init__(config=config)
         self.start_calls = 0
         self.stop_calls = 0
 
@@ -50,9 +66,14 @@ class _FailingStartSource(ManagedSourceAdapter[int]):
         self.stop_calls += 1
 
 
-class _BlockingStartSource(ManagedSourceAdapter[int]):
-    def __init__(self) -> None:
-        super().__init__(out_maxsize=8, out_timeout=0.01)
+class _BlockingStartSource(ManagedSourceAdapter[int, BaseProducerConfig]):
+    def __init__(
+        self,
+        config: BaseProducerConfig = BaseProducerConfig(
+            out_maxsize=8, out_timeout=0.01
+        ),
+    ) -> None:
+        super().__init__(config=config)
         self.start_calls = 0
         self.stop_calls = 0
         self.entered_start = threading.Event()

@@ -6,16 +6,21 @@ import threading
 import pytest
 
 from inference_pipeline.buffer import BufferQ
+from inference_pipeline.configs import BaseBroadcastStageConfig, BaseSplitStageConfig
 from inference_pipeline.fanout import BroadcastStage, SplitStage
 
 
-class _ParitySplit(SplitStage[int, str, int]):
-    def __init__(self) -> None:
+class _ParitySplit(SplitStage[int, str, int, BaseSplitStageConfig]):
+    def __init__(self, config: BaseSplitStageConfig | None = None) -> None:
         super().__init__(
-            out_a_maxsize=16,
-            out_b_maxsize=16,
-            out_a_timeout=0.01,
-            out_b_timeout=0.01,
+            config=config
+            or BaseSplitStageConfig(
+                name="parity-split",
+                out_a_maxsize=16,
+                out_b_maxsize=16,
+                out_a_timeout=0.01,
+                out_b_timeout=0.01,
+            )
         )
 
     def split(self, item: int) -> tuple[str | None, int | None]:
@@ -28,11 +33,23 @@ class _ParitySplit(SplitStage[int, str, int]):
 
 def test_broadcast_stage_rejects_zero_outputs() -> None:
     with pytest.raises(ValueError, match="n_outputs must be >= 1"):
-        BroadcastStage[int](n_outputs=0, out_maxsize=4)
+        BroadcastStage[int](
+            config=BaseBroadcastStageConfig(
+                n_outputs=0,
+                out_maxsize=4,
+                out_timeout=0.01,
+            )
+        )
 
 
 def test_broadcast_outputs_exposes_all_queues_consistently() -> None:
-    stage = BroadcastStage[int](n_outputs=3, out_maxsize=4, out_timeout=0.01)
+    stage = BroadcastStage[int](
+        config=BaseBroadcastStageConfig(
+            n_outputs=3,
+            out_maxsize=4,
+            out_timeout=0.01,
+        )
+    )
 
     outputs = stage.outputs
 
@@ -45,9 +62,11 @@ def test_broadcast_outputs_exposes_all_queues_consistently() -> None:
 
 def test_broadcast_stage_aliases_payload_without_copy_fn() -> None:
     stage: BroadcastStage[dict[str, int]] = BroadcastStage(
-        n_outputs=2,
-        out_maxsize=8,
-        out_timeout=0.01,
+        config=BaseBroadcastStageConfig(
+            n_outputs=2,
+            out_maxsize=8,
+            out_timeout=0.01,
+        )
     )
     payload = {"count": 1}
     input_q: BufferQ[dict[str, int]] = BufferQ(maxsize=8, default_timeout=0.01)
@@ -67,10 +86,12 @@ def test_broadcast_stage_aliases_payload_without_copy_fn() -> None:
 
 def test_broadcast_stage_copy_fn_creates_independent_payloads() -> None:
     stage: BroadcastStage[dict[str, int]] = BroadcastStage(
-        n_outputs=2,
-        out_maxsize=8,
-        out_timeout=0.01,
-        copy_fn=copy.deepcopy,
+        config=BaseBroadcastStageConfig(
+            n_outputs=2,
+            out_maxsize=8,
+            out_timeout=0.01,
+            copy_fn=copy.deepcopy,
+        )
     )
     payload = {"count": 10}
     input_q: BufferQ[dict[str, int]] = BufferQ(maxsize=8, default_timeout=0.01)
@@ -91,7 +112,13 @@ def test_broadcast_stage_copy_fn_creates_independent_payloads() -> None:
 
 
 def test_broadcast_stage_honors_stop_event() -> None:
-    stage = BroadcastStage[int](n_outputs=2, out_maxsize=8, out_timeout=0.01)
+    stage = BroadcastStage[int](
+        config=BaseBroadcastStageConfig(
+            n_outputs=2,
+            out_maxsize=8,
+            out_timeout=0.01,
+        )
+    )
     input_q: BufferQ[int] = BufferQ(maxsize=8, default_timeout=0.01)
     input_q.put(1)
     input_q.put(2)
@@ -121,15 +148,19 @@ def test_split_stage_routes_items_and_closes_outputs() -> None:
 
 
 def test_broadcast_stage_threaded_fans_out_to_all_outputs() -> None:
-    stage = BroadcastStage[int](n_outputs=2, out_maxsize=8, out_timeout=0.01)
+    stage = BroadcastStage[int](
+        config=BaseBroadcastStageConfig(
+            n_outputs=2,
+            out_maxsize=8,
+            out_timeout=0.01,
+        )
+    )
     input_q: BufferQ[int] = BufferQ(maxsize=8, default_timeout=0.01)
     for value in [3, 4, 5]:
         input_q.put(value)
     input_q.close()
 
-    task = stage.threaded(
-        input_q, name="broadcast-thread", daemon=False, join_timeout=1.0
-    )
+    task = stage.threaded(input_q, daemon=False, join_timeout=1.0)
     task.start()
     task.join()
 
@@ -146,7 +177,7 @@ def test_split_stage_threaded_routes_and_closes_outputs() -> None:
         input_q.put(value)
     input_q.close()
 
-    task = stage.threaded(input_q, name="split-thread", daemon=False, join_timeout=1.0)
+    task = stage.threaded(input_q, daemon=False, join_timeout=1.0)
     task.start()
     task.join()
 
