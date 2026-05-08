@@ -4,7 +4,7 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from types import TracebackType
-from typing import Self, TypeVar
+from typing import Self
 
 from inference_pipeline.buffer import BufferQ
 from inference_pipeline.protocols import (
@@ -14,10 +14,6 @@ from inference_pipeline.protocols import (
     BaseStageConfigI,
 )
 from inference_pipeline.runtime import ThreadTask
-
-InT = TypeVar("InT")
-OutT = TypeVar("OutT")
-ConfT = TypeVar("ConfT")
 
 
 class Stage[InT, OutT, ConfT: BaseStageConfigI](ABC):

@@ -7,7 +7,7 @@ independently and one slow branch does not block delivery to the others.
 import threading
 from abc import ABC, abstractmethod
 from types import TracebackType
-from typing import Self, TypeVar
+from typing import Self
 
 from inference_pipeline.buffer import BufferQ
 from inference_pipeline.protocols import (
@@ -15,11 +15,6 @@ from inference_pipeline.protocols import (
     BaseSplitStageConfigI,
 )
 from inference_pipeline.runtime import ThreadTask
-
-T = TypeVar("T")
-InT = TypeVar("InT")
-OutAT = TypeVar("OutAT")
-OutBT = TypeVar("OutBT")
 
 
 class BroadcastStage[T](ABC):

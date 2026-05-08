@@ -2,9 +2,6 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeVar
-
-T = TypeVar("T")
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)

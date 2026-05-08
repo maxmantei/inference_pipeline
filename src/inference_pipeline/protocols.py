@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Protocol, TypeVar
+from typing import TYPE_CHECKING, Protocol
 
 from inference_pipeline.buffer import BufferQ
 
 if TYPE_CHECKING:
     from inference_pipeline.runtime import ThreadTask
-
-T = TypeVar("T")
 
 
 class BaseConfigI(Protocol):
@@ -221,7 +219,7 @@ class SplitLike[InT, OutAT, OutBT](Protocol):
         """Return output queue B."""
         ...
 
-    def run(self, input_q: BufferQ[InT], stop: threading.Event | None) -> None:
+    def run(self, input_q: BufferQ[InT], stop: threading.Event | None = None) -> None:
         """Run in blocking mode until input closes or an optional stop signal."""
         ...
 
@@ -253,7 +251,7 @@ class BroadcastLike[T](Protocol):
         """Return one output queue by index."""
         ...
 
-    def run(self, input_q: BufferQ[T], stop: threading.Event | None) -> None:
+    def run(self, input_q: BufferQ[T], stop: threading.Event | None = None) -> None:
         """Broadcast each incoming item to all outputs until input closes."""
         ...
 
