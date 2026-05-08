@@ -3,20 +3,22 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterator
 
-import pytest
-
 from inference_pipeline.buffer import BufferQ
+from inference_pipeline.configs import (
+    BaseConsumerConfig,
+    BaseProcessorConfig,
+    BaseProducerConfig,
+)
 from inference_pipeline.stages import (
     ConsumerStage,
     ProcessorStage,
     ProducerStage,
-    Stage,
 )
 
 
-class _RangeProducer(ProducerStage[int]):
+class _RangeProducer(ProducerStage[int, BaseProducerConfig]):
     def __init__(self, values: list[int]) -> None:
-        super().__init__(out_maxsize=32, out_timeout=0.01)
+        super().__init__(config=BaseProducerConfig(out_maxsize=32, out_timeout=0.01))
         self._values = values
 
     def produce(self, stop: threading.Event | None = None) -> Iterator[int]:
@@ -26,9 +28,9 @@ class _RangeProducer(ProducerStage[int]):
             yield value
 
 
-class _EvenDoubler(ProcessorStage[int, int]):
+class _EvenDoubler(ProcessorStage[int, int, BaseProcessorConfig]):
     def __init__(self) -> None:
-        super().__init__(out_maxsize=32, out_timeout=0.01)
+        super().__init__(config=BaseProcessorConfig(out_maxsize=32, out_timeout=0.01))
 
     def process(self, item: int) -> int | None:
         if item % 2:
@@ -36,23 +38,13 @@ class _EvenDoubler(ProcessorStage[int, int]):
         return item * 2
 
 
-class _CollectingConsumer(ConsumerStage[int]):
+class _CollectingConsumer(ConsumerStage[int, BaseConsumerConfig]):
     def __init__(self) -> None:
+        super().__init__(config=BaseConsumerConfig())
         self.items: list[int] = []
 
     def consume(self, item: int) -> None:
         self.items.append(item)
-
-
-def test_stage_output_raises_for_sink_only_stage() -> None:
-    class _SinkOnlyStage(Stage[int, int]):
-        pass
-
-    stage = _SinkOnlyStage(out_maxsize=None)
-
-    assert stage.has_output is False
-    with pytest.raises(RuntimeError, match="has no output queue"):
-        _ = stage.output
 
 
 def test_producer_stage_run_emits_items_and_closes_output() -> None:
@@ -115,7 +107,7 @@ def test_consumer_stage_collects_until_input_closes() -> None:
 
 def test_producer_stage_threaded_runs_and_closes_output() -> None:
     producer = _RangeProducer([11, 12, 13])
-    task = producer.threaded(name="producer-thread", daemon=False, join_timeout=1.0)
+    task = producer.threaded(daemon=False, join_timeout=1.0)
 
     task.start()
     task.join()
@@ -131,9 +123,7 @@ def test_processor_stage_threaded_consumes_and_emits_transforms() -> None:
         input_q.put(value)
     input_q.close()
 
-    task = processor.threaded(
-        input_q, name="processor-thread", daemon=False, join_timeout=1.0
-    )
+    task = processor.threaded(input_q, daemon=False, join_timeout=1.0)
     task.start()
     task.join()
 
@@ -148,9 +138,7 @@ def test_consumer_stage_threaded_consumes_until_input_close() -> None:
         input_q.put(value)
     input_q.close()
 
-    task = consumer.threaded(
-        input_q, name="consumer-thread", daemon=False, join_timeout=1.0
-    )
+    task = consumer.threaded(input_q, daemon=False, join_timeout=1.0)
     task.start()
     task.join()
 

@@ -6,11 +6,14 @@ independently and one slow branch does not block delivery to the others.
 
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from types import TracebackType
 from typing import Self, TypeVar
 
 from inference_pipeline.buffer import BufferQ
+from inference_pipeline.protocols import (
+    BaseBroadcastStageConfigI,
+    BaseSplitStageConfigI,
+)
 from inference_pipeline.runtime import ThreadTask
 
 T = TypeVar("T")
@@ -19,35 +22,25 @@ OutAT = TypeVar("OutAT")
 OutBT = TypeVar("OutBT")
 
 
-class BroadcastStage[T]:
+class BroadcastStage[T](ABC):
     """Broadcast one input stream to ``N`` homogeneous output queues."""
 
-    def __init__(
-        self,
-        n_outputs: int,
-        *,
-        out_maxsize: int,
-        out_timeout: float = 0.5,
-        copy_fn: Callable[[T], T] | None = None,
-    ) -> None:
+    def __init__(self, *, config: BaseBroadcastStageConfigI[T]) -> None:
         """Create a broadcast stage.
 
         Args:
-            n_outputs: Number of output queues to expose.
-            out_maxsize: Capacity for each output queue.
-            out_timeout: Default timeout for each output queue iterator.
-            copy_fn: Optional per-branch payload copy function.
+            config: Broadcast stage configuration object.
 
         Raises:
             ValueError: If ``n_outputs`` is less than 1.
         """
-        if n_outputs < 1:
+        self.config = config
+        if config.n_outputs < 1:
             raise ValueError("n_outputs must be >= 1")
         self._outputs: tuple[BufferQ[T], ...] = tuple(
-            BufferQ[T](maxsize=out_maxsize, default_timeout=out_timeout)
-            for _ in range(n_outputs)
+            BufferQ[T](maxsize=config.out_maxsize, default_timeout=config.out_timeout)
+            for _ in range(config.n_outputs)
         )
-        self._copy_fn = copy_fn
 
     @property
     def outputs(self) -> tuple[BufferQ[T], ...]:
@@ -63,21 +56,24 @@ class BroadcastStage[T]:
         with self:
             for item in input_q.iter_until_closed(stop=stop):
                 for out_q in self._outputs:
-                    out_q.put(item if self._copy_fn is None else self._copy_fn(item))
+                    out_q.put(
+                        item
+                        if self.config.copy_fn is None
+                        else self.config.copy_fn(item)
+                    )
 
     def threaded(
         self,
         input_q: BufferQ[T],
         *,
         stop: threading.Event | None = None,
-        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
         """Return a ``ThreadTask`` that runs this broadcast stage in a thread."""
         return ThreadTask.from_runner(
             lambda: self.run(input_q, stop=stop),
-            thread_name=name or f"{type(self).__name__}-worker",
+            thread_name=f"{self.config.name or type(self).__name__}-worker",
             daemon=daemon,
             join_timeout=join_timeout,
         )
@@ -97,23 +93,21 @@ class BroadcastStage[T]:
             out_q.close()
 
 
-class SplitStage[InT, OutAT, OutBT](ABC):
+class SplitStage[InT, OutAT, OutBT, SConfT: BaseSplitStageConfigI](ABC):
     """Split one input stream into two typed output streams."""
 
-    def __init__(
-        self,
-        *,
-        out_a_maxsize: int,
-        out_b_maxsize: int,
-        out_a_timeout: float = 0.5,
-        out_b_timeout: float = 0.5,
-    ) -> None:
-        """Create a two-branch split stage with independent output queues."""
+    def __init__(self, *, config: SConfT) -> None:
+        """Create a two-branch split stage with independent output queues.
+
+        Args:
+            config: Split stage configuration object.
+        """
+        self.config = config
         self._output_a = BufferQ[OutAT](
-            maxsize=out_a_maxsize, default_timeout=out_a_timeout
+            maxsize=config.out_a_maxsize, default_timeout=config.out_a_timeout
         )
         self._output_b = BufferQ[OutBT](
-            maxsize=out_b_maxsize, default_timeout=out_b_timeout
+            maxsize=config.out_b_maxsize, default_timeout=config.out_b_timeout
         )
 
     @property
@@ -141,14 +135,13 @@ class SplitStage[InT, OutAT, OutBT](ABC):
         input_q: BufferQ[InT],
         *,
         stop: threading.Event | None = None,
-        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
         """Return a ``ThreadTask`` that runs this split stage in a thread."""
         return ThreadTask.from_runner(
             lambda: self.run(input_q, stop=stop),
-            thread_name=name or f"{type(self).__name__}-worker",
+            thread_name=f"{self.config.name or type(self).__name__}-worker",
             daemon=daemon,
             join_timeout=join_timeout,
         )
