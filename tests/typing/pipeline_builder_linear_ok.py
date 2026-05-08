@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+from typing_extensions import reveal_type
+
+from inference_pipeline.configs import (
+    BaseConsumerConfig,
+    BaseProcessorConfig,
+    BaseProducerConfig,
+)
+from inference_pipeline.pipeline import PipelineBuilder
+from inference_pipeline.stages import ConsumerStage, ProcessorStage, ProducerStage
+
+
+class NumberSource(ProducerStage[int, BaseProducerConfig]):
+    def produce(self, stop=None):  # type: ignore[override]
+        raise NotImplementedError
+
+
+class IntToStr(ProcessorStage[int, str, BaseProcessorConfig]):
+    def process(self, item: int) -> str | None:
+        raise NotImplementedError
+
+
+class CollectStr(ConsumerStage[str, BaseConsumerConfig]):
+    def consume(self, item: str) -> None:
+        raise NotImplementedError
+
+
+builder = PipelineBuilder("inference")
+stream = builder.source(
+    "frames",
+    NumberSource,
+    config=BaseProducerConfig(out_maxsize=8, out_timeout=0.01),
+)
+reveal_type(stream)
+
+decoded = stream.then(
+    "decode",
+    IntToStr,
+    config=BaseProcessorConfig(out_maxsize=8, out_timeout=0.01),
+)
+reveal_type(decoded)
+
+result = decoded.sink(
+    "writer",
+    CollectStr,
+    config=BaseConsumerConfig(),
+)
+reveal_type(result)

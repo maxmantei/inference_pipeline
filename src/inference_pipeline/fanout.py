@@ -62,13 +62,14 @@ class BroadcastStage[T](ABC):
         input_q: BufferQ[T],
         *,
         stop: threading.Event | None = None,
+        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
         """Return a ``ThreadTask`` that runs this broadcast stage in a thread."""
         return ThreadTask.from_runner(
             lambda: self.run(input_q, stop=stop),
-            thread_name=f"{self.config.name or type(self).__name__}-worker",
+            thread_name=name or f"{self.config.name or type(self).__name__}-worker",
             daemon=daemon,
             join_timeout=join_timeout,
         )
@@ -130,13 +131,14 @@ class SplitStage[InT, OutAT, OutBT, SConfT: BaseSplitStageConfigI](ABC):
         input_q: BufferQ[InT],
         *,
         stop: threading.Event | None = None,
+        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
         """Return a ``ThreadTask`` that runs this split stage in a thread."""
         return ThreadTask.from_runner(
             lambda: self.run(input_q, stop=stop),
-            thread_name=f"{self.config.name or type(self).__name__}-worker",
+            thread_name=name or f"{self.config.name or type(self).__name__}-worker",
             daemon=daemon,
             join_timeout=join_timeout,
         )

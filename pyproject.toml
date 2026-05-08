@@ -33,3 +33,7 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.ty.src]
+include = ["src", "tests"]
+exclude = ["src/inference_pipeline/_internal.py"]

@@ -62,13 +62,14 @@ class ProducerStage[OutT, ConfT: BaseProducerConfigI](Stage[None, OutT, ConfT], 
         self,
         *,
         stop: threading.Event | None = None,
+        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
         """Return a ``ThreadTask`` that runs this producer in a worker thread."""
         return ThreadTask.from_runner(
             lambda: self.run(stop=stop),
-            thread_name=f"{self.config.name or type(self).__name__}-worker",
+            thread_name=name or f"{self.config.name or type(self).__name__}-worker",
             daemon=daemon,
             join_timeout=join_timeout,
         )
@@ -97,13 +98,14 @@ class ProcessorStage[InT, OutT, ConfT: BaseProcessorConfigI](
         input_q: BufferQ[InT],
         *,
         stop: threading.Event | None = None,
+        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
         """Return a ``ThreadTask`` that runs this processor in a worker thread."""
         return ThreadTask.from_runner(
             lambda: self.run(input_q, stop=stop),
-            thread_name=f"{self.config.name or type(self).__name__}-worker",
+            thread_name=name or f"{self.config.name or type(self).__name__}-worker",
             daemon=daemon,
             join_timeout=join_timeout,
         )
@@ -135,13 +137,14 @@ class ConsumerStage[InT, ConfT: BaseConsumerConfigI](ABC):
         input_q: BufferQ[InT],
         *,
         stop: threading.Event | None = None,
+        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
         """Return a ``ThreadTask`` that runs this consumer in a worker thread."""
         return ThreadTask.from_runner(
             lambda: self.run(input_q, stop=stop),
-            thread_name=f"{self.config.name or type(self).__name__}-worker",
+            thread_name=name or f"{self.config.name or type(self).__name__}-worker",
             daemon=daemon,
             join_timeout=join_timeout,
         )

@@ -20,7 +20,7 @@ def test_threadtask_rejects_invalid_configuration(
     match: str,
 ) -> None:
     with pytest.raises(ValueError, match=match):
-        ThreadTask(_runner=lambda: None, **kwargs)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+        ThreadTask(_runner=lambda: None, **kwargs)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type]
 
 
 def test_threadtask_start_join_happy_path_and_state_transitions() -> None:

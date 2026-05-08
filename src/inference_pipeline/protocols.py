@@ -121,6 +121,7 @@ class ProducerLike[T](Protocol):
         self,
         *,
         stop: threading.Event | None = None,
+        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
@@ -150,11 +151,17 @@ class ProcessorLike[InT, OutT](Protocol):
         """Run in blocking mode until input closes or an optional stop signal."""
         ...
 
+    @property
+    def output(self) -> BufferQ[OutT]:
+        """Return the output queue consumed by downstream stages."""
+        ...
+
     def threaded(
         self,
         input_q: BufferQ[InT],
         *,
         stop: threading.Event | None = None,
+        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
@@ -178,6 +185,7 @@ class ConsumerLike[T](Protocol):
         input_q: BufferQ[T],
         *,
         stop: threading.Event | None = None,
+        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
@@ -228,6 +236,7 @@ class SplitLike[InT, OutAT, OutBT](Protocol):
         input_q: BufferQ[InT],
         *,
         stop: threading.Event | None = None,
+        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
@@ -260,6 +269,7 @@ class BroadcastLike[T](Protocol):
         input_q: BufferQ[T],
         *,
         stop: threading.Event | None = None,
+        name: str | None = None,
         daemon: bool = True,
         join_timeout: float = 5.0,
     ) -> ThreadTask:
