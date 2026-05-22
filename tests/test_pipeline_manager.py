@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Iterator
 
 import pytest
@@ -16,11 +17,17 @@ from inference_pipeline.configs import (
 )
 from inference_pipeline.fanout import BroadcastStage, SplitStage
 from inference_pipeline.pipeline import (
+    DuplicateRunId,
     Pipeline,
     PipelineBuilder,
     PipelineManager,
+    PipelineRunActive,
+    PipelineRunCompleted,
+    PipelineRunNotFound,
     PipelineSpec,
     PipelineState,
+    ResourceLimitExceeded,
+    RunInfo,
 )
 from inference_pipeline.stages import ConsumerStage, ProcessorStage, ProducerStage
 
@@ -228,7 +235,7 @@ def test_manager_create_rejects_duplicate_explicit_run_id() -> None:
 
     manager.create(spec, run_id="custom-run")
 
-    with pytest.raises(ValueError, match="custom-run"):
+    with pytest.raises(DuplicateRunId, match="custom-run"):
         manager.create(spec, run_id="custom-run")
 
 
@@ -251,7 +258,7 @@ def test_manager_pipeline_returns_completed_pipeline_by_run_id() -> None:
 def test_manager_pipeline_rejects_unknown_run_id() -> None:
     manager = PipelineManager()
 
-    with pytest.raises(KeyError, match="missing"):
+    with pytest.raises(PipelineRunNotFound, match="missing"):
         manager.pipeline("missing")
 
 
@@ -320,7 +327,7 @@ def test_manager_join_returns_completed_pipeline_when_run_already_finished() -> 
 def test_manager_join_rejects_unknown_run_id() -> None:
     manager = PipelineManager()
 
-    with pytest.raises(KeyError, match="missing"):
+    with pytest.raises(PipelineRunNotFound, match="missing"):
         manager.join("missing")
 
 
@@ -340,7 +347,7 @@ def test_manager_stop_signals_active_pipeline() -> None:
 def test_manager_stop_rejects_unknown_run_id() -> None:
     manager = PipelineManager()
 
-    with pytest.raises(KeyError, match="missing"):
+    with pytest.raises(PipelineRunNotFound, match="missing"):
         manager.stop("missing")
 
 
@@ -350,7 +357,7 @@ def test_manager_stop_rejects_completed_run() -> None:
 
     manager.run(spec)
 
-    with pytest.raises(RuntimeError, match="completed|active"):
+    with pytest.raises(PipelineRunCompleted, match="already completed"):
         manager.stop("runtime-run-1")
 
 
@@ -370,14 +377,14 @@ def test_manager_discard_rejects_active_pipeline() -> None:
 
     manager.create(_linear_spec())
 
-    with pytest.raises(RuntimeError, match="active|completed"):
+    with pytest.raises(PipelineRunActive, match="still active"):
         manager.discard("inference-run-1")
 
 
 def test_manager_discard_rejects_unknown_run_id() -> None:
     manager = PipelineManager()
 
-    with pytest.raises(KeyError, match="missing"):
+    with pytest.raises(PipelineRunNotFound, match="missing"):
         manager.discard("missing")
 
 
@@ -427,3 +434,431 @@ def test_manager_run_supports_split_pipeline() -> None:
     pipeline = manager.run(spec)
 
     assert pipeline.state is PipelineState.SUCCEEDED
+
+
+# ------------------------------------------------------------------
+# Resource limits
+# ------------------------------------------------------------------
+
+
+def test_manager_create_rejects_exceeded_max_active() -> None:
+    manager = PipelineManager(max_active_runs=1)
+    spec = _linear_spec()
+
+    manager.create(spec)
+
+    with pytest.raises(ResourceLimitExceeded, match="Max active"):
+        manager.create(spec)
+
+
+def test_manager_start_rejects_exceeded_max_active() -> None:
+    manager = PipelineManager(max_active_runs=1)
+    spec = _runtime_spec()
+
+    pipeline = manager.start(spec)
+    manager.stop(pipeline.spec.name + "-run-1")
+
+    with pytest.raises(ResourceLimitExceeded, match="Max active"):
+        manager.start(spec)
+
+
+def test_manager_run_rejects_exceeded_max_active() -> None:
+    manager = PipelineManager(max_active_runs=1)
+    spec = _linear_spec()
+
+    manager.create(spec)
+
+    with pytest.raises(ResourceLimitExceeded, match="Max active"):
+        manager.create(spec)
+
+
+def test_manager_max_active_zero_allows_unlimited() -> None:
+    manager = PipelineManager(max_active_runs=0)
+    spec = _linear_spec()
+
+    for _ in range(10):
+        manager.create(spec)
+
+    assert manager.active_count == 10
+
+
+# ------------------------------------------------------------------
+# Observability: RunInfo
+# ------------------------------------------------------------------
+
+
+def test_manager_run_info_returns_lightweight_status() -> None:
+    manager = PipelineManager()
+    spec = _runtime_spec()
+    created_before = time.time()
+
+    manager.run(spec)
+    info = manager.run_info("runtime-run-1")
+
+    assert isinstance(info, RunInfo)
+    assert info.run_id == "runtime-run-1"
+    assert info.spec_name == "runtime"
+    assert info.state is PipelineState.SUCCEEDED
+    assert info.created_at >= created_before
+    assert info.started_at is not None and info.started_at >= info.created_at
+    assert info.finished_at is not None and info.finished_at >= info.started_at
+    assert info.error is None
+
+
+def test_manager_run_info_with_failure() -> None:
+    manager = PipelineManager()
+    spec = _runtime_spec(fail_on="value:2")
+
+    with pytest.raises(RuntimeError):
+        manager.run(spec)
+
+    info = manager.run_info("runtime-run-1")
+    assert info.state is PipelineState.FAILED
+    assert info.error is not None
+    assert "failed on" in info.error
+    assert info.finished_at is not None
+
+
+def test_manager_run_info_for_active_run() -> None:
+    manager = PipelineManager()
+    spec = _runtime_spec()
+
+    manager.start(spec)
+    info = manager.run_info("runtime-run-1")
+
+    assert info.state is PipelineState.RUNNING
+    assert info.started_at is not None
+    assert info.finished_at is None
+
+    manager.stop("runtime-run-1")
+    manager.join("runtime-run-1")
+
+
+def test_manager_run_info_rejects_unknown() -> None:
+    manager = PipelineManager()
+
+    with pytest.raises(PipelineRunNotFound):
+        manager.run_info("nobody")
+
+
+# ------------------------------------------------------------------
+# Observability: list_runs
+# ------------------------------------------------------------------
+
+
+def test_manager_list_runs() -> None:
+    manager = PipelineManager()
+    spec = _runtime_spec()
+
+    manager.run(spec)
+    manager.run(spec)
+
+    runs = manager.list_runs()
+    assert len(runs) == 2
+    assert all(isinstance(r, RunInfo) for r in runs)
+
+
+def test_manager_list_runs_mixed_active_and_completed() -> None:
+    manager = PipelineManager()
+    spec = _runtime_spec()
+
+    manager.start(spec)
+    manager.stop("runtime-run-1")
+    manager.run(spec)
+
+    runs = manager.list_runs()
+    assert len(runs) == 2
+
+
+# ------------------------------------------------------------------
+# Observability: counts
+# ------------------------------------------------------------------
+
+
+def test_manager_active_count() -> None:
+    manager = PipelineManager()
+
+    manager.create(_linear_spec())
+    assert manager.active_count == 1
+
+    manager.create(_linear_spec())
+    assert manager.active_count == 2
+
+    manager.discard_completed()
+    assert manager.active_count == 2
+
+
+def test_manager_completed_count() -> None:
+    manager = PipelineManager()
+    spec = _runtime_spec()
+
+    assert manager.completed_count == 0
+
+    manager.run(spec)
+    assert manager.completed_count == 1
+
+
+def test_manager_empty_counts() -> None:
+    manager = PipelineManager()
+
+    assert manager.active_count == 0
+    assert manager.completed_count == 0
+
+
+# ------------------------------------------------------------------
+# Observability: oldest_active_run
+# ------------------------------------------------------------------
+
+
+def test_manager_oldest_active_run() -> None:
+    manager = PipelineManager()
+
+    manager.create(_linear_spec())
+    oldest = manager.oldest_active_run
+    assert oldest is not None
+    assert oldest.run_id == "inference-run-1"
+
+
+def test_manager_oldest_active_run_none_when_empty() -> None:
+    manager = PipelineManager()
+
+    assert manager.oldest_active_run is None
+
+
+def test_manager_oldest_active_run_returns_oldest() -> None:
+    manager = PipelineManager()
+    spec = _linear_spec()
+
+    manager.create(spec)
+    manager.create(spec)
+
+    oldest = manager.oldest_active_run
+    assert oldest is not None
+    assert oldest.run_id == "inference-run-1"
+
+
+# ------------------------------------------------------------------
+# Observability: runs_by_state
+# ------------------------------------------------------------------
+
+
+def test_manager_runs_by_state() -> None:
+    manager = PipelineManager()
+
+    manager.create(_linear_spec())
+    manager.run(_runtime_spec())
+
+    counts = manager.runs_by_state()
+    assert counts.get(PipelineState.CREATED, 0) == 1
+    assert counts.get(PipelineState.SUCCEEDED, 0) == 1
+
+
+# ------------------------------------------------------------------
+# Observability: health
+# ------------------------------------------------------------------
+
+
+def test_manager_health_returns_expected_keys() -> None:
+    manager = PipelineManager()
+    spec = _runtime_spec()
+
+    manager.run(spec)
+
+    h = manager.health()
+    assert h["active_count"] == 0
+    assert h["completed_count"] == 1
+    assert h["oldest_active_seconds"] is None
+    assert h["oldest_active_run_id"] is None
+    assert isinstance(h["runs_by_state"], dict)
+
+
+def test_manager_health_with_active_run() -> None:
+    manager = PipelineManager()
+
+    manager.create(_linear_spec())
+
+    h = manager.health()
+    assert h["active_count"] == 1
+    assert h["completed_count"] == 0
+    assert h["oldest_active_seconds"] is not None
+    assert h["oldest_active_run_id"] == "inference-run-1"
+
+
+# ------------------------------------------------------------------
+# cancel
+# ------------------------------------------------------------------
+
+
+def test_manager_cancel_active_removes_run() -> None:
+    manager = PipelineManager()
+    spec = _runtime_spec()
+
+    manager.start(spec)
+    manager.cancel("runtime-run-1")
+
+    assert "runtime-run-1" not in manager._active
+    assert "runtime-run-1" not in manager._completed
+
+
+def test_manager_cancel_completed_removes_run() -> None:
+    manager = PipelineManager()
+    spec = _runtime_spec()
+
+    manager.run(spec)
+    manager.cancel("runtime-run-1")
+
+    assert "runtime-run-1" not in manager._completed
+
+
+def test_manager_cancel_rejects_unknown() -> None:
+    manager = PipelineManager()
+
+    with pytest.raises(PipelineRunNotFound):
+        manager.cancel("missing")
+
+
+# ------------------------------------------------------------------
+# discard_completed
+# ------------------------------------------------------------------
+
+
+def test_manager_discard_completed_all() -> None:
+    manager = PipelineManager()
+
+    manager.run(_runtime_spec())
+    manager.run(_runtime_spec())
+
+    count = manager.discard_completed()
+    assert count == 2
+    assert manager.completed_count == 0
+
+
+def test_manager_discard_completed_older_than() -> None:
+    manager = PipelineManager()
+
+    manager.run(_runtime_spec())
+    time.sleep(0.01)
+
+    count = manager.discard_completed(older_than=0.005)
+    assert count == 1
+    assert manager.completed_count == 0
+
+
+def test_manager_discard_completed_older_than_none_expired() -> None:
+    manager = PipelineManager()
+
+    manager.run(_runtime_spec())
+
+    count = manager.discard_completed(older_than=3600)
+    assert count == 0
+    assert manager.completed_count == 1
+
+
+# ------------------------------------------------------------------
+# Context manager
+# ------------------------------------------------------------------
+
+
+def test_manager_context_manager_enter_exit() -> None:
+    with PipelineManager() as manager:
+        assert isinstance(manager, PipelineManager)
+        manager.run(_runtime_spec())
+        assert manager.completed_count == 1
+
+
+def test_manager_context_manager_stops_active() -> None:
+    spec = _runtime_spec()
+    manager = PipelineManager()
+
+    pipeline = manager.start(spec)
+    manager.close()
+
+    assert pipeline.state in {PipelineState.STOPPED, PipelineState.SUCCEEDED}
+
+
+# ------------------------------------------------------------------
+# TTL auto-cleanup
+# ------------------------------------------------------------------
+
+
+def test_manager_ttl_auto_removes_completed() -> None:
+    manager = PipelineManager(completed_run_ttl=0.1)
+
+    manager.run(_runtime_spec())
+    assert manager.completed_count == 1
+
+    time.sleep(0.3)
+
+    assert manager.completed_count == 0
+
+
+def test_manager_ttl_daemon_thread_does_not_block() -> None:
+    manager = PipelineManager(completed_run_ttl=0.1)
+
+    # Cleanup thread is a daemon and won't block process exit
+    assert manager._cleanup_thread is not None
+    assert manager._cleanup_thread.daemon is True
+    assert manager._cleanup_thread.is_alive()
+
+    manager.run(_runtime_spec())
+
+    time.sleep(0.3)
+    assert manager.completed_count == 0
+
+    manager.close()
+
+
+# ------------------------------------------------------------------
+# Thread safety
+# ------------------------------------------------------------------
+
+
+def test_manager_thread_safety_concurrent_create() -> None:
+    import concurrent.futures
+
+    manager = PipelineManager()
+    spec = _linear_spec()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(manager.create, spec) for _ in range(20)]
+        results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+    assert len(results) == 20
+    assert manager.active_count == 20
+    # All run IDs should be unique - verify no duplicates
+    run_ids_in_manager = set(manager._active)
+    assert len(run_ids_in_manager) == 20
+    # Every result should be a Pipeline
+    assert all(isinstance(r, Pipeline) for r in results)
+
+
+def test_manager_thread_safety_stop_and_join() -> None:
+    import concurrent.futures
+
+    manager = PipelineManager()
+    spec = _runtime_spec()
+
+    pipeline = manager.start(spec)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        stop_future = ex.submit(manager.stop, "runtime-run-1")
+        join_future = ex.submit(manager.join, "runtime-run-1")
+        stop_future.result()
+        join_future.result()
+
+    assert pipeline.state in {PipelineState.STOPPED, PipelineState.SUCCEEDED}
+
+
+# ------------------------------------------------------------------
+# Discard of already-discarded run
+# ------------------------------------------------------------------
+
+
+def test_manager_discard_twice_raises() -> None:
+    manager = PipelineManager()
+
+    manager.run(_runtime_spec())
+    manager.discard("runtime-run-1")
+
+    with pytest.raises(PipelineRunNotFound):
+        manager.discard("runtime-run-1")

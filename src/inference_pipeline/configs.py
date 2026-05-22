@@ -30,7 +30,7 @@ class BaseProducerConfig(BaseStageConfig):
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
-class BaseProcessorConfig(BaseProducerConfig):
+class BaseProcessorConfig(BaseStageConfig):
     """Configuration for processor stages."""
 
     pass

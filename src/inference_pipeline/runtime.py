@@ -91,19 +91,20 @@ class ThreadTask:
         )
         self._thread.start()
 
-    def join(self) -> None:
+    def join(self, timeout: float | None = None) -> None:
         """Wait for worker completion and surface timeout or worker errors.
 
+        ``timeout`` overrides the per-task ``join_timeout`` when provided.
         Calling ``join()`` before ``start()`` is a no-op, which makes teardown
         code safe to call unconditionally in ``finally`` blocks.
         """
         if self._thread is None:
             return
-        self._thread.join(timeout=self.join_timeout)
+        effective = timeout if timeout is not None else self.join_timeout
+        self._thread.join(timeout=effective)
         if self._thread.is_alive():
             message = (
-                f"Worker thread {self.name!r} did not finish within "
-                f"{self.join_timeout:.1f}s."
+                f"Worker thread {self.name!r} did not finish within {effective:.1f}s."
             )
             raise TimeoutError(message)
         self._raise_worker_error()
