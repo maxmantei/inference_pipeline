@@ -178,8 +178,16 @@ class ManagedSinkAdapter[T, ConfT: BaseConfigI](SinkAdapter[T, ConfT], ABC):
             join_timeout=join_timeout,
         )
 
+    @abstractmethod
     def _start_impl(self) -> None:
         """Subclass hook containing concrete startup logic."""
 
+    @abstractmethod
+    def consume(self, item: T) -> None:
+        """Subclass hook containing concrete item consumption logic."""
+        raise NotImplementedError
+
+    @abstractmethod
     def _stop_impl(self) -> None:
-        """Subclass hook containing concrete teardown logic."""
+        """Subclass hook containing concrete shutdown logic."""
+        raise NotImplementedError

@@ -129,10 +129,7 @@ class ManagedSourceAdapter[T, ConfT: BaseProducerConfigI](SourceAdapter[T, ConfT
                 if self._running:
                     return
                 if self._output.closed:
-                    raise RuntimeError(
-                        "Cannot restart a stopped source adapter; "
-                        "create a new adapter instance."
-                    )
+                    raise RuntimeError("Cannot restart a stopped source adapter.")
                 self._running = True
                 self._shutdown_event.clear()
             try:
