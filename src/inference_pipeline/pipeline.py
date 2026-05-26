@@ -1064,6 +1064,8 @@ class PipelineManager:
         return record.pipeline
 
     def _start_cleanup(self) -> None:
+        if self._ttl is None:
+            return
         ttl: float = self._ttl  # type: ignore[assignment]  # guarded by caller
         interval = max(min(ttl / 4, 1.0), 0.05)
         stop_event = threading.Event()
