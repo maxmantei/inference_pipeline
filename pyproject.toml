@@ -27,7 +27,7 @@ python_version = "3.13"
 files = ["src"]
 
 [tool.ruff]
-line-length = 88
+line-length = 108
 target-version = "py313"
 src = ["src", "tests"]
 
