@@ -700,11 +700,17 @@ class StreamBuilder[T]:
         return fragment(self)
 
 
-class PipelineState(StrEnum):
-    """Lifecycle state for one instantiated ephemeral pipeline."""
+class PipelinePhase(StrEnum):
+    """Execution phase for one instantiated pipeline."""
 
     CREATED = "created"
     RUNNING = "running"
+    TERMINATED = "terminated"
+
+
+class PipelineOutcome(StrEnum):
+    """Terminal completion outcome for a pipeline run."""
+
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     STOPPED = "stopped"
@@ -724,11 +730,16 @@ class Pipeline:
 
     def __init__(self, spec: PipelineSpec) -> None:
         self._spec = spec
-        self._state = PipelineState.CREATED
+        self._phase = PipelinePhase.CREATED
+        self._outcome: PipelineOutcome | None = None
         self._steps: dict[str, LiveStep] = {}
         self._tasks: dict[str, ThreadTask] = {}
         self._error: BaseException | None = None
         self._stop_event = threading.Event()
+        self._stop_requested_at: float | None = None
+        self._started_at: float | None = None
+        self._finished_at: float | None = None
+        self._done_event = threading.Event()
         self._materialize()
 
     @classmethod
@@ -740,8 +751,40 @@ class Pipeline:
         return self._spec
 
     @property
-    def state(self) -> PipelineState:
-        return self._state
+    def phase(self) -> PipelinePhase:
+        return self._phase
+
+    @property
+    def outcome(self) -> PipelineOutcome | None:
+        return self._outcome
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_event.is_set()
+
+    @property
+    def stop_requested_at(self) -> float | None:
+        return self._stop_requested_at
+
+    @property
+    def started_at(self) -> float | None:
+        return self._started_at
+
+    @property
+    def finished_at(self) -> float | None:
+        return self._finished_at
+
+    @property
+    def done(self) -> bool:
+        return self._done_event.is_set()
+
+    @property
+    def done_event(self) -> threading.Event:
+        return self._done_event
+
+    @property
+    def is_alive(self) -> bool:
+        return any(task.is_alive for task in self._tasks.values())
 
     @property
     def steps(self) -> Mapping[str, LiveStep]:
@@ -856,24 +899,32 @@ class Pipeline:
         return any(callable(getattr(step, "stop", None)) for step in self._steps.values())
 
     def start(self) -> None:
-        if self._state is not PipelineState.CREATED:
+        """Start worker threads once and transition the pipeline to running."""
+        if self._phase is not PipelinePhase.CREATED:
             raise RuntimeError("Pipeline is single-use and has already been started.")
         for task in self._tasks.values():
             task.start()
-        self._state = PipelineState.RUNNING
+        self._phase = PipelinePhase.RUNNING
+        self._started_at = time.time()
 
-    def stop(self) -> None:
+    def request_stop(self) -> None:
+        """Signal workers to stop gracefully without waiting for termination."""
+        if not self._stop_event.is_set():
+            self._stop_requested_at = time.time()
         self._stop_event.set()
-        if self._state is PipelineState.RUNNING:
-            self._state = PipelineState.STOPPED
 
-    def join(self, timeout: float | None = None) -> None:
+    def wait(self, timeout: float | None = None, *, raise_on_error: bool = True) -> None:
+        """Wait for worker termination and finalize the terminal outcome."""
+        if self._phase is PipelinePhase.CREATED:
+            return
+        if self._phase is PipelinePhase.TERMINATED:
+            if raise_on_error and self._error is not None:
+                raise RuntimeError("Pipeline failed.") from self._error
+            return
+
         deadline = (time.monotonic() + timeout) if timeout is not None else None
         worker_error: BaseException | None = None
-        pending_lifecycle_stop = self._has_lifecycle_steps() and self._state in {
-            PipelineState.RUNNING,
-            PipelineState.STOPPED,
-        }
+        pending_lifecycle_stop = self._has_lifecycle_steps()
 
         if pending_lifecycle_stop:
             self._stop_lifecycle_steps()
@@ -896,20 +947,33 @@ class Pipeline:
                     task.join(timeout=timeout)
 
         if worker_error is not None:
-            self._state = PipelineState.FAILED
             self._error = worker_error.__cause__ or worker_error
-            raise worker_error
+            self._outcome = PipelineOutcome.FAILED
+            self._phase = PipelinePhase.TERMINATED
+            self._finished_at = time.time()
+            self._done_event.set()
+            if raise_on_error:
+                raise worker_error
+            return
 
-        if self._state is PipelineState.RUNNING:
-            self._state = PipelineState.STOPPED if self._stop_event.is_set() else PipelineState.SUCCEEDED
+        self._outcome = PipelineOutcome.STOPPED if self._stop_event.is_set() else PipelineOutcome.SUCCEEDED
+        self._phase = PipelinePhase.TERMINATED
+        self._finished_at = time.time()
+        self._done_event.set()
 
     def run(self) -> None:
+        """Run the pipeline synchronously from start through termination."""
         self.start()
         try:
-            self.join()
+            self.wait()
         except BaseException:
             self.raise_for_error()
             raise
+
+    def cancel(self, timeout: float | None = None) -> None:
+        """Request stop and block until the run reaches termination."""
+        self.request_stop()
+        self.wait(timeout=timeout, raise_on_error=False)
 
     def raise_for_error(self) -> None:
         if self._error is not None:
@@ -970,18 +1034,18 @@ class ResourceLimitExceeded(PipelineError):
 
 @dataclass(frozen=True, slots=True)
 class RunInfo:
-    """Observable status for one pipeline run, safe for external use.
-
-    Unlike the full ``Pipeline`` object, this dataclass contains no reference
-    to live steps or threads and is trivially serializable.
-    """
+    """Serializable lifecycle snapshot for one managed pipeline run."""
 
     run_id: str
     spec_name: str
-    state: PipelineState
+    phase: PipelinePhase
+    outcome: PipelineOutcome | None
+    stop_requested: bool
+    done: bool
     created_at: float
     started_at: float | None = None
     finished_at: float | None = None
+    stop_requested_at: float | None = None
     error: str | None = None
 
 
@@ -993,8 +1057,6 @@ class _RunRecord:
     run_id: str
     spec_name: str
     created_at: float
-    started_at: float | None = None
-    finished_at: float | None = None
 
 
 class PipelineManager:
@@ -1008,9 +1070,7 @@ class PipelineManager:
         self._max_active = max_active_runs
         self._ttl = completed_run_ttl
         self._lock = threading.RLock()
-        self._created: dict[str, _RunRecord] = {}
-        self._running: dict[str, _RunRecord] = {}
-        self._completed: dict[str, _RunRecord] = {}
+        self._runs: dict[str, _RunRecord] = {}
         self._next_run_number: dict[str, int] = {}
         self._stop_cleanup: threading.Event | None = None
         self._cleanup_thread: threading.Thread | None = None
@@ -1020,17 +1080,38 @@ class PipelineManager:
     @property
     def created(self) -> Mapping[str, Pipeline]:
         with self._lock:
-            return MappingProxyType({rid: rec.pipeline for rid, rec in self._created.items()})
+            self._reconcile_runs()
+            return MappingProxyType(
+                {
+                    rid: rec.pipeline
+                    for rid, rec in self._runs.items()
+                    if rec.pipeline.phase is PipelinePhase.CREATED
+                }
+            )
 
     @property
     def running(self) -> Mapping[str, Pipeline]:
         with self._lock:
-            return MappingProxyType({rid: rec.pipeline for rid, rec in self._running.items()})
+            self._reconcile_runs()
+            return MappingProxyType(
+                {
+                    rid: rec.pipeline
+                    for rid, rec in self._runs.items()
+                    if rec.pipeline.phase is PipelinePhase.RUNNING
+                }
+            )
 
     @property
     def completed(self) -> Mapping[str, Pipeline]:
         with self._lock:
-            return MappingProxyType({rid: rec.pipeline for rid, rec in self._completed.items()})
+            self._reconcile_runs()
+            return MappingProxyType(
+                {
+                    rid: rec.pipeline
+                    for rid, rec in self._runs.items()
+                    if rec.pipeline.phase is PipelinePhase.TERMINATED
+                }
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1043,21 +1124,21 @@ class PipelineManager:
             return f"{spec.name}-run-{next_number}"
 
     def _ensure_run_id_available(self, run_id: str) -> None:
-        with self._lock:
-            if run_id in self._created or run_id in self._running or run_id in self._completed:
-                raise DuplicateRunId(run_id)
+        if run_id in self._runs:
+            raise DuplicateRunId(run_id)
 
     def _ensure_resource_limit(self) -> None:
-        with self._lock:
-            if self._max_active and len(self._running) + len(self._created) >= self._max_active:
-                raise ResourceLimitExceeded(self._max_active)
+        if self._max_active and self.active_count >= self._max_active:
+            raise ResourceLimitExceeded(self._max_active)
 
-    def _move_to_completed(self, run_id: str, record: _RunRecord) -> _RunRecord:
-        with self._lock:
-            self._running.pop(run_id, None)
-            record.finished_at = time.time()
-            self._completed[run_id] = record
-            return record
+    def _reconcile_runs(self) -> None:
+        for record in self._runs.values():
+            pipeline = record.pipeline
+            if pipeline.phase is not PipelinePhase.RUNNING:
+                continue
+            if pipeline.is_alive:
+                continue
+            pipeline.wait(timeout=0, raise_on_error=False)
 
     def _start_cleanup(self) -> None:
         if self._ttl is None:
@@ -1081,15 +1162,19 @@ class PipelineManager:
         stop_event: threading.Event,
     ) -> None:
         while not stop_event.wait(timeout=interval):
+            with self._lock:
+                self._reconcile_runs()
             now = time.time()
             with self._lock:
                 expired = [
                     rid
-                    for rid, rec in self._completed.items()
-                    if rec.finished_at is not None and (now - rec.finished_at) >= ttl
+                    for rid, rec in self._runs.items()
+                    if rec.pipeline.finished_at is not None
+                    and rec.pipeline.phase is PipelinePhase.TERMINATED
+                    and (now - rec.pipeline.finished_at) >= ttl
                 ]
                 for rid in expired:
-                    del self._completed[rid]
+                    del self._runs[rid]
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1097,11 +1182,13 @@ class PipelineManager:
 
     def create_run(self, spec: PipelineSpec) -> _RunRecord:
         with self._lock:
+            self._reconcile_runs()
+            self._ensure_resource_limit()
             resolved_run_id = self._generated_run_id(spec)
             self._ensure_run_id_available(resolved_run_id)
-            self._ensure_resource_limit()
         pipeline = Pipeline.create(spec)
         with self._lock:
+            self._reconcile_runs()
             self._ensure_run_id_available(resolved_run_id)
             self._ensure_resource_limit()
             record = _RunRecord(
@@ -1110,22 +1197,20 @@ class PipelineManager:
                 spec_name=spec.name,
                 created_at=time.time(),
             )
-            self._created[resolved_run_id] = record
+            self._runs[resolved_run_id] = record
             return record
 
     def start_run(self, run_id: str) -> _RunRecord:
         with self._lock:
-            record = self._created.get(run_id)
+            self._reconcile_runs()
+            record = self._runs.get(run_id)
             if record is None:
-                if run_id in self._running:
-                    raise PipelineRunActive(run_id)
-                if run_id in self._completed:
-                    raise PipelineRunCompleted(run_id)
                 raise PipelineRunNotFound(run_id)
+            if record.pipeline.phase is PipelinePhase.RUNNING:
+                raise PipelineRunActive(run_id)
+            if record.pipeline.phase is PipelinePhase.TERMINATED:
+                raise PipelineRunCompleted(run_id)
             record.pipeline.start()
-            record.started_at = time.time()
-            self._running[run_id] = record
-            del self._created[run_id]
             return record
 
     def start(self, spec: PipelineSpec) -> _RunRecord:
@@ -1134,109 +1219,67 @@ class PipelineManager:
 
     def run_by_id(self, run_id: str) -> _RunRecord:
         with self._lock:
-            if run_id in self._completed:
-                raise PipelineRunCompleted(run_id)
-            if run_id in self._running:
-                raise PipelineRunActive(run_id)
-            record = self._created.get(run_id)
+            self._reconcile_runs()
+            record = self._runs.get(run_id)
             if record is None:
                 raise PipelineRunNotFound(run_id)
-            record.started_at = time.time()
-            self._running[run_id] = record
-            del self._created[run_id]
+            if record.pipeline.phase is PipelinePhase.RUNNING:
+                raise PipelineRunActive(run_id)
+            if record.pipeline.phase is PipelinePhase.TERMINATED:
+                raise PipelineRunCompleted(run_id)
             pipeline = record.pipeline
-        try:
-            pipeline.run()
-        except BaseException:
-            with self._lock:
-                self._move_to_completed(run_id, record)
-            raise
-        with self._lock:
-            return self._move_to_completed(run_id, record)
+        pipeline.run()
+        return record
 
     def run(self, spec: PipelineSpec) -> _RunRecord:
         record = self.create_run(spec)
         return self.run_by_id(record.run_id)
-        # with self._lock:
-        #    resolved_run_id = self._generated_run_id(spec)
-        #    self._ensure_run_id_available(resolved_run_id)
-        #    if self._max_active and len(self._running) + len(self._created) >= self._max_active:
-        #        raise ResourceLimitExceeded(self._max_active)
-        #    pipeline = Pipeline.create(spec)
-        #    record = _RunRecord(
-        #        pipeline=pipeline,
-        #        run_id=resolved_run_id,
-        #        spec_name=spec.name,
-        #        created_at=time.time(),
-        #        started_at=time.time(),
-        #    )
-        #    self._running[resolved_run_id] = record
-        # try:
-        #    pipeline.run()
-        # except BaseException:
-        #    with self._lock:
-        #        self._move_to_completed(resolved_run_id, record)
-        #    raise
-        # with self._lock:
-        #    return self._move_to_completed(resolved_run_id, record)
 
-    def stop(self, run_id: str) -> None:
+    def request_stop(self, run_id: str) -> None:
+        """Request stop on a running run without waiting for termination."""
         with self._lock:
-            if run_id in self._completed:
-                raise PipelineRunCompleted(run_id)
-            if run_id in self._created:
-                raise PipelineNotStarted(run_id)
-            record = self._running.get(run_id)
+            self._reconcile_runs()
+            record = self._runs.get(run_id)
             if record is None:
                 raise PipelineRunNotFound(run_id)
-            record.pipeline.stop()
+            if record.pipeline.phase is PipelinePhase.TERMINATED:
+                raise PipelineRunCompleted(run_id)
+            if record.pipeline.phase is PipelinePhase.CREATED:
+                raise PipelineNotStarted(run_id)
+            record.pipeline.request_stop()
 
-    def join(
+    def wait(
         self,
         run_id: str,
         *,
         timeout: float | None = None,
+        raise_on_error: bool = True,
     ) -> _RunRecord:
         with self._lock:
-            if run_id in self._completed:
-                return self._completed[run_id]
-            record = self._running.get(run_id)
+            self._reconcile_runs()
+            record = self._runs.get(run_id)
             if record is None:
                 raise PipelineRunNotFound(run_id)
-        pipeline = record.pipeline
-        try:
-            pipeline.join(timeout=timeout)
-        except BaseException:
-            with self._lock:
-                self._move_to_completed(run_id, record)
-            raise
-        with self._lock:
-            return self._move_to_completed(run_id, record)
+        record.pipeline.wait(timeout=timeout, raise_on_error=raise_on_error)
+        return record
 
     def pipeline(self, run_id: str) -> Pipeline:
         with self._lock:
-            record = self._running.get(run_id)
-            if record is not None:
-                return record.pipeline
-            record = self._completed.get(run_id)
-            if record is not None:
-                return record.pipeline
-            record = self._created.get(run_id)
+            self._reconcile_runs()
+            record = self._runs.get(run_id)
             if record is not None:
                 return record.pipeline
             raise PipelineRunNotFound(run_id)
 
     def discard(self, run_id: str) -> None:
         with self._lock:
-            if run_id in self._running:
+            self._reconcile_runs()
+            record = self._runs.get(run_id)
+            if record is None:
+                raise PipelineRunNotFound(run_id)
+            if record.pipeline.phase is not PipelinePhase.TERMINATED:
                 raise PipelineRunActive(run_id)
-            if run_id in self._completed:
-                del self._completed[run_id]
-                return
-            if run_id in self._created:
-                del self._created[run_id]
-                return
-            raise PipelineRunNotFound(run_id)
+            del self._runs[run_id]
 
     # ------------------------------------------------------------------
     # Observability
@@ -1244,77 +1287,116 @@ class PipelineManager:
 
     def run_info(self, run_id: str) -> RunInfo:
         with self._lock:
-            record = self._running.get(run_id) or self._completed.get(run_id) or self._created.get(run_id)
+            self._reconcile_runs()
+            record = self._runs.get(run_id)
             if record is None:
                 raise PipelineRunNotFound(run_id)
+            pipeline = record.pipeline
             return RunInfo(
                 run_id=record.run_id,
                 spec_name=record.spec_name,
-                state=record.pipeline.state,
+                phase=pipeline.phase,
+                outcome=pipeline.outcome,
+                stop_requested=pipeline.stop_requested,
+                done=pipeline.done,
                 created_at=record.created_at,
-                started_at=record.started_at,
-                finished_at=record.finished_at,
-                error=str(record.pipeline.error) if record.pipeline.error is not None else None,
+                started_at=pipeline.started_at,
+                finished_at=pipeline.finished_at,
+                stop_requested_at=pipeline.stop_requested_at,
+                error=str(pipeline.error) if pipeline.error is not None else None,
             )
 
     def list_runs(self) -> list[RunInfo]:
         with self._lock:
-            ids = list(self._running) + list(self._completed) + list(self._created)
+            self._reconcile_runs()
+            ids = list(self._runs)
             return [self.run_info(rid) for rid in ids]
 
     @property
     def created_count(self) -> int:
         with self._lock:
-            return len(self._created)
+            self._reconcile_runs()
+            return sum(
+                1 for record in self._runs.values() if record.pipeline.phase is PipelinePhase.CREATED
+            )
 
     @property
     def running_count(self) -> int:
         with self._lock:
-            return len(self._running)
+            self._reconcile_runs()
+            return sum(
+                1 for record in self._runs.values() if record.pipeline.phase is PipelinePhase.RUNNING
+            )
 
     @property
     def completed_count(self) -> int:
         with self._lock:
-            return len(self._completed)
+            self._reconcile_runs()
+            return sum(
+                1 for record in self._runs.values() if record.pipeline.phase is PipelinePhase.TERMINATED
+            )
+
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            self._reconcile_runs()
+            return sum(
+                1 for record in self._runs.values() if record.pipeline.phase is not PipelinePhase.TERMINATED
+            )
 
     @property
     def oldest_running(self) -> RunInfo | None:
         with self._lock:
+            self._reconcile_runs()
             oldest: _RunRecord | None = None
-            for record in self._running.values():
-                if record.started_at is None:
-                    continue
-                if oldest is None or record.started_at < oldest.started_at:
+            records = [
+                record
+                for record in self._runs.values()
+                if record.pipeline.phase is PipelinePhase.RUNNING and record.pipeline.started_at is not None
+            ]
+            for record in records:
+                if oldest is None or cast(float | int, record.pipeline.started_at) < cast(
+                    float | int, oldest.pipeline.started_at
+                ):
                     oldest = record
             if oldest is None:
                 return None
             return self.run_info(oldest.run_id)
 
-    def runs_by_state(self) -> dict[PipelineState, int]:
-        counts: dict[PipelineState, int] = {}
+    def runs_by_phase(self) -> dict[PipelinePhase, int]:
+        counts: dict[PipelinePhase, int] = {}
         with self._lock:
-            for record in self._running.values():
-                s = record.pipeline.state
-                counts[s] = counts.get(s, 0) + 1
-            for record in self._completed.values():
-                s = record.pipeline.state
-                counts[s] = counts.get(s, 0) + 1
-            for record in self._created.values():
-                s = record.pipeline.state
-                counts[s] = counts.get(s, 0) + 1
+            self._reconcile_runs()
+            for record in self._runs.values():
+                phase = record.pipeline.phase
+                counts[phase] = counts.get(phase, 0) + 1
+        return counts
+
+    def runs_by_outcome(self) -> dict[PipelineOutcome, int]:
+        counts: dict[PipelineOutcome, int] = {}
+        with self._lock:
+            self._reconcile_runs()
+            for record in self._runs.values():
+                outcome = record.pipeline.outcome
+                if outcome is None:
+                    continue
+                counts[outcome] = counts.get(outcome, 0) + 1
         return counts
 
     def health(self) -> dict[str, object]:
         with self._lock:
+            self._reconcile_runs()
             oldest = self.oldest_running
             now = time.time()
             return {
                 "created_count": self.created_count,
                 "running_count": self.running_count,
                 "completed_count": self.completed_count,
+                "active_count": self.active_count,
                 "oldest_running_seconds": ((now - oldest.created_at) if oldest is not None else None),
                 "oldest_running_run_id": oldest.run_id if oldest is not None else None,
-                "runs_by_state": self.runs_by_state(),
+                "runs_by_phase": self.runs_by_phase(),
+                "runs_by_outcome": self.runs_by_outcome(),
             }
 
     # ------------------------------------------------------------------
@@ -1322,50 +1404,49 @@ class PipelineManager:
     # ------------------------------------------------------------------
 
     def stop_all(self) -> None:
+        """Request stop for all currently running runs."""
         with self._lock:
-            for record in self._running.values():
-                record.pipeline.stop()
+            self._reconcile_runs()
+            for record in self._runs.values():
+                if record.pipeline.phase is PipelinePhase.RUNNING:
+                    record.pipeline.request_stop()
 
     def cancel(self, run_id: str, *, timeout: float | None = None) -> None:
+        """Request stop for a run and wait for it to terminate."""
         with self._lock:
-            record = self._running.get(run_id)
+            self._reconcile_runs()
+            record = self._runs.get(run_id)
             if record is None:
-                if run_id in self._completed:
-                    del self._completed[run_id]
-                    return
-                if run_id in self._created:
-                    del self._created[run_id]
-                    return
                 raise PipelineRunNotFound(run_id)
-            record.pipeline.stop()
+            if record.pipeline.phase is PipelinePhase.CREATED:
+                raise PipelineNotStarted(run_id)
+            if record.pipeline.phase is PipelinePhase.TERMINATED:
+                return
+            record.pipeline.request_stop()
 
-        try:
-            record.pipeline.join(timeout=timeout)
-        except BaseException as exc:
-            warning_message = (
-                f"Warning: pipeline run {run_id!r} did not stop within timeout after cancellation."
-            )
-            warning_message += f" Exception: {exc}"
-            warnings.warn(warning_message)
-        record.finished_at = time.time()
-        with self._lock:
-            self._running.pop(run_id, None)
-            self._completed.pop(run_id, None)
+        record.pipeline.wait(timeout=timeout, raise_on_error=False)
 
     def discard_completed(self, older_than: float | None = None) -> int:
         with self._lock:
+            self._reconcile_runs()
             if older_than is None:
-                count = len(self._completed)
-                self._completed.clear()
+                terminated_ids = [
+                    rid for rid, rec in self._runs.items() if rec.pipeline.phase is PipelinePhase.TERMINATED
+                ]
+                for rid in terminated_ids:
+                    del self._runs[rid]
+                count = len(terminated_ids)
                 return count
             now = time.time()
             expired = [
                 rid
-                for rid, rec in self._completed.items()
-                if rec.finished_at is not None and (now - rec.finished_at) >= older_than
+                for rid, rec in self._runs.items()
+                if rec.pipeline.phase is PipelinePhase.TERMINATED
+                and rec.pipeline.finished_at is not None
+                and (now - rec.pipeline.finished_at) >= older_than
             ]
             for rid in expired:
-                del self._completed[rid]
+                del self._runs[rid]
             return len(expired)
 
     # ------------------------------------------------------------------
@@ -1379,6 +1460,7 @@ class PipelineManager:
         self.close()
 
     def close(self) -> None:
+        """Stop managed runs, wait for termination, and clear run records."""
         if self._stop_cleanup is not None:
             self._stop_cleanup.set()
         if self._cleanup_thread is not None and self._cleanup_thread.is_alive():
@@ -1386,16 +1468,16 @@ class PipelineManager:
         self.stop_all()
 
         with self._lock:
-            records = [record for record in self._running.values()]
+            records = [
+                record for record in self._runs.values() if record.pipeline.phase is PipelinePhase.RUNNING
+            ]
 
         for record in records:
             try:
-                record.pipeline.join()
+                record.pipeline.wait(raise_on_error=False)
             except BaseException as exc:
                 msg = f"Warning: pipeline run {record.run_id!r} did not stop within timeout."
                 msg += f" Exception: {exc}"
                 warnings.warn(msg)
         with self._lock:
-            self._running.clear()
-            self._completed.clear()
-            self._created.clear()
+            self._runs.clear()

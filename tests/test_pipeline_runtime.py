@@ -15,7 +15,12 @@ from inference_pipeline.configs import (
     BaseSplitStageConfig,
 )
 from inference_pipeline.fanout import BroadcastStage, SplitStage
-from inference_pipeline.pipeline import Pipeline, PipelineBuilder, PipelineState
+from inference_pipeline.pipeline import (
+    Pipeline,
+    PipelineBuilder,
+    PipelineOutcome,
+    PipelinePhase,
+)
 from inference_pipeline.stages import ConsumerStage, ProcessorStage, ProducerStage
 
 
@@ -195,9 +200,7 @@ def _split_runtime_pipeline(*, fail_on_reject: str | None = None) -> Pipeline:
         config=_split_config(),
     )
     accepted.sink("writer", _CollectStr, config=BaseConsumerConfig())
-    rejected.sink(
-        "rejects", _CollectInt, config=BaseConsumerConfig(name=fail_on_reject)
-    )
+    rejected.sink("rejects", _CollectInt, config=BaseConsumerConfig(name=fail_on_reject))
     pipeline = Pipeline.create(builder.freeze())
 
     source = pipeline.step("frames")
@@ -262,10 +265,12 @@ def test_pipeline_create_is_canonical_construction_path() -> None:
     assert isinstance(pipeline, Pipeline)
 
 
-def test_pipeline_create_sets_created_state() -> None:
+def test_pipeline_create_sets_created_phase() -> None:
     pipeline = Pipeline.create(_linear_spec())
 
-    assert pipeline.state is PipelineState.CREATED
+    assert pipeline.phase is PipelinePhase.CREATED
+    assert pipeline.outcome is None
+    assert pipeline.done is False
 
 
 def test_pipeline_create_preserves_spec() -> None:
@@ -331,7 +336,9 @@ def test_pipeline_start_transitions_to_running() -> None:
 
     pipeline.start()
 
-    assert pipeline.state is PipelineState.RUNNING
+    assert pipeline.phase is PipelinePhase.RUNNING
+    assert pipeline.outcome is None
+    assert pipeline.started_at is not None
 
 
 def test_pipeline_run_completes_successfully() -> None:
@@ -339,7 +346,9 @@ def test_pipeline_run_completes_successfully() -> None:
 
     pipeline.run()
 
-    assert pipeline.state is PipelineState.SUCCEEDED
+    assert pipeline.phase is PipelinePhase.TERMINATED
+    assert pipeline.outcome is PipelineOutcome.SUCCEEDED
+    assert pipeline.done is True
     writer = pipeline.step("writer")
     assert isinstance(writer, _CollectStr)
     assert writer.items == ["value:1", "value:2", "value:3"]
@@ -354,15 +363,19 @@ def test_pipeline_start_is_single_use() -> None:
         pipeline.start()
 
 
-def test_pipeline_stop_is_idempotent() -> None:
+def test_pipeline_request_stop_is_idempotent() -> None:
     pipeline = _runtime_pipeline()
 
     pipeline.start()
-    pipeline.stop()
-    pipeline.stop()
-    pipeline.join()
+    pipeline.request_stop()
+    first_requested_at = pipeline.stop_requested_at
+    pipeline.request_stop()
+    pipeline.wait()
 
-    assert pipeline.state in {PipelineState.STOPPED, PipelineState.SUCCEEDED}
+    assert pipeline.stop_requested is True
+    assert first_requested_at is not None
+    assert pipeline.stop_requested_at == first_requested_at
+    assert pipeline.outcome is PipelineOutcome.STOPPED
 
 
 def test_pipeline_failure_transitions_to_failed() -> None:
@@ -371,7 +384,8 @@ def test_pipeline_failure_transitions_to_failed() -> None:
     with pytest.raises(RuntimeError, match="failed on value:2"):
         pipeline.run()
 
-    assert pipeline.state is PipelineState.FAILED
+    assert pipeline.phase is PipelinePhase.TERMINATED
+    assert pipeline.outcome is PipelineOutcome.FAILED
     assert isinstance(pipeline.error, RuntimeError)
 
 
@@ -380,7 +394,7 @@ def test_pipeline_raise_for_error_reraises_worker_failure() -> None:
 
     pipeline.start()
     with pytest.raises(RuntimeError, match="Worker thread"):
-        pipeline.join()
+        pipeline.wait()
 
     with pytest.raises(RuntimeError, match="failed on value:2"):
         pipeline.raise_for_error()
@@ -391,7 +405,7 @@ def test_split_pipeline_run_completes_successfully() -> None:
 
     pipeline.run()
 
-    assert pipeline.state is PipelineState.SUCCEEDED
+    assert pipeline.outcome is PipelineOutcome.SUCCEEDED
     writer = pipeline.step("writer")
     rejects = pipeline.step("rejects")
     assert isinstance(writer, _CollectStr)
@@ -405,7 +419,7 @@ def test_broadcast_pipeline_run_completes_successfully() -> None:
 
     pipeline.run()
 
-    assert pipeline.state is PipelineState.SUCCEEDED
+    assert pipeline.outcome is PipelineOutcome.SUCCEEDED
     writer = pipeline.step("writer")
     preview = pipeline.step("preview")
     assert isinstance(writer, _CollectInt)
@@ -420,7 +434,7 @@ def test_branch_failure_transitions_pipeline_to_failed() -> None:
     with pytest.raises(RuntimeError, match="failed on 2"):
         pipeline.run()
 
-    assert pipeline.state is PipelineState.FAILED
+    assert pipeline.outcome is PipelineOutcome.FAILED
     assert isinstance(pipeline.error, RuntimeError)
 
 
@@ -440,24 +454,35 @@ def test_pipeline_run_supports_managed_source_and_sink_adapters() -> None:
     assert writer.items == ["value:1", "value:2", "value:3"]
 
 
-def test_pipeline_stop_before_join_keeps_stopped_terminal_state() -> None:
+def test_pipeline_request_stop_before_wait_keeps_stopped_terminal_outcome() -> None:
     pipeline = _runtime_pipeline()
 
     pipeline.start()
-    pipeline.stop()
-    pipeline.join()
+    pipeline.request_stop()
+    pipeline.wait()
 
-    assert pipeline.state is PipelineState.STOPPED
+    assert pipeline.phase is PipelinePhase.TERMINATED
+    assert pipeline.outcome is PipelineOutcome.STOPPED
 
 
-def test_pipeline_join_is_repeatable_after_success() -> None:
+def test_pipeline_wait_is_repeatable_after_success() -> None:
     pipeline = _runtime_pipeline()
 
     pipeline.start()
-    pipeline.join()
-    pipeline.join()
+    pipeline.wait()
+    pipeline.wait()
 
-    assert pipeline.state is PipelineState.SUCCEEDED
+    assert pipeline.outcome is PipelineOutcome.SUCCEEDED
+
+
+def test_pipeline_cancel_requests_stop_and_waits() -> None:
+    pipeline = _runtime_pipeline()
+
+    pipeline.start()
+    pipeline.cancel()
+
+    assert pipeline.phase is PipelinePhase.TERMINATED
+    assert pipeline.outcome is PipelineOutcome.STOPPED
 
 
 def test_pipeline_task_names_use_builder_names() -> None:

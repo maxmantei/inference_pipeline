@@ -80,6 +80,9 @@ class _FailingStartSink(ManagedSinkAdapter[int, BaseConsumerConfig]):
         self.start_calls += 1
         raise RuntimeError("start failed")
 
+    def _stop_impl(self) -> None:
+        return
+
     def consume(self, item: int) -> None:
         return
 
