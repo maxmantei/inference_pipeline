@@ -716,6 +716,14 @@ class PipelineOutcome(StrEnum):
     STOPPED = "stopped"
 
 
+class PipelineStopMode(StrEnum):
+    """Requested shutdown strategy for a running pipeline."""
+
+    NONE = "none"
+    IMMEDIATE = "immediate"
+    DRAIN = "drain"
+
+
 type LiveStep = (
     ProducerLike[Any]
     | ProcessorLike[Any, Any]
@@ -736,7 +744,8 @@ class Pipeline:
         self._tasks: dict[str, ThreadTask] = {}
         self._error: BaseException | None = None
         self._stop_event = threading.Event()
-        self._stop_requested_at: float | None = None
+        self._stop_mode = PipelineStopMode.NONE
+        self._stop_mode_requested_at: float | None = None
         self._started_at: float | None = None
         self._finished_at: float | None = None
         self._done_event = threading.Event()
@@ -759,12 +768,16 @@ class Pipeline:
         return self._outcome
 
     @property
-    def stop_requested(self) -> bool:
-        return self._stop_event.is_set()
+    def stop_mode(self) -> PipelineStopMode:
+        return self._stop_mode
 
     @property
-    def stop_requested_at(self) -> float | None:
-        return self._stop_requested_at
+    def stop_requested(self) -> bool:
+        return self._stop_mode is not PipelineStopMode.NONE
+
+    @property
+    def stop_mode_requested_at(self) -> float | None:
+        return self._stop_mode_requested_at
 
     @property
     def started_at(self) -> float | None:
@@ -888,15 +901,31 @@ class Pipeline:
             stop=self._stop_event,
         )
 
-    def _stop_lifecycle_steps(self) -> None:
-        for step in self._steps.values():
+    def _stop_lifecycle_sources(self) -> None:
+        for step_spec in self._spec.steps:
+            if step_spec.kind is not StepKind.SOURCE:
+                continue
+            step = self._steps[step_spec.name]
             running = getattr(step, "running", None)
             stop = getattr(step, "stop", None)
             if isinstance(running, bool) and running and callable(stop):
                 stop()
 
-    def _has_lifecycle_steps(self) -> bool:
-        return any(callable(getattr(step, "stop", None)) for step in self._steps.values())
+    def _stop_lifecycle_sinks(self) -> None:
+        for step_spec in self._spec.steps:
+            if step_spec.kind is not StepKind.SINK:
+                continue
+            step = self._steps[step_spec.name]
+            running = getattr(step, "running", None)
+            stop = getattr(step, "stop", None)
+            if isinstance(running, bool) and running and callable(stop):
+                stop()
+
+    def _has_lifecycle_sources(self) -> bool:
+        return any(
+            step.kind is StepKind.SOURCE and callable(getattr(self._steps[step.name], "stop", None))
+            for step in self._spec.steps
+        )
 
     def start(self) -> None:
         """Start worker threads once and transition the pipeline to running."""
@@ -909,9 +938,21 @@ class Pipeline:
 
     def request_stop(self) -> None:
         """Signal workers to stop gracefully without waiting for termination."""
-        if not self._stop_event.is_set():
-            self._stop_requested_at = time.time()
+        if self._stop_mode is not PipelineStopMode.IMMEDIATE:
+            self._stop_mode = PipelineStopMode.IMMEDIATE
+            self._stop_mode_requested_at = time.time()
         self._stop_event.set()
+
+    def request_drain(self) -> None:
+        """Stop sources and let already-buffered work drain through the graph."""
+        if self._phase is not PipelinePhase.RUNNING:
+            return
+        if self._stop_mode is PipelineStopMode.IMMEDIATE:
+            return
+        if self._stop_mode is not PipelineStopMode.DRAIN:
+            self._stop_mode = PipelineStopMode.DRAIN
+            self._stop_mode_requested_at = time.time()
+        self._stop_lifecycle_sources()
 
     def wait(self, timeout: float | None = None, *, raise_on_error: bool = True) -> None:
         """Wait for worker termination and finalize the terminal outcome."""
@@ -924,10 +965,12 @@ class Pipeline:
 
         deadline = (time.monotonic() + timeout) if timeout is not None else None
         worker_error: BaseException | None = None
-        pending_lifecycle_stop = self._has_lifecycle_steps()
+        pending_lifecycle_stop = self._has_lifecycle_sources()
 
         if pending_lifecycle_stop:
-            self._stop_lifecycle_steps()
+            self._stop_lifecycle_sources()
+        if self._stop_mode is PipelineStopMode.IMMEDIATE:
+            self._stop_lifecycle_sinks()
 
         for task in self._tasks.values():
             try:
@@ -941,7 +984,9 @@ class Pipeline:
                     self._stop_event.set()
 
         if worker_error is not None and not pending_lifecycle_stop:
-            self._stop_lifecycle_steps()
+            self._stop_lifecycle_sources()
+            if self._stop_mode is PipelineStopMode.IMMEDIATE:
+                self._stop_lifecycle_sinks()
             for task in self._tasks.values():
                 if task.is_alive:
                     task.join(timeout=timeout)
@@ -956,7 +1001,11 @@ class Pipeline:
                 raise worker_error
             return
 
-        self._outcome = PipelineOutcome.STOPPED if self._stop_event.is_set() else PipelineOutcome.SUCCEEDED
+        self._outcome = (
+            PipelineOutcome.STOPPED
+            if self._stop_mode is PipelineStopMode.IMMEDIATE
+            else PipelineOutcome.SUCCEEDED
+        )
         self._phase = PipelinePhase.TERMINATED
         self._finished_at = time.time()
         self._done_event.set()
@@ -974,6 +1023,11 @@ class Pipeline:
         """Request stop and block until the run reaches termination."""
         self.request_stop()
         self.wait(timeout=timeout, raise_on_error=False)
+
+    def drain(self, timeout: float | None = None, *, raise_on_error: bool = True) -> None:
+        """Request drain mode and wait for termination."""
+        self.request_drain()
+        self.wait(timeout=timeout, raise_on_error=raise_on_error)
 
     def raise_for_error(self) -> None:
         if self._error is not None:
@@ -1040,12 +1094,12 @@ class RunInfo:
     spec_name: str
     phase: PipelinePhase
     outcome: PipelineOutcome | None
-    stop_requested: bool
+    stop_mode: PipelineStopMode
     done: bool
     created_at: float
     started_at: float | None = None
     finished_at: float | None = None
-    stop_requested_at: float | None = None
+    stop_mode_requested_at: float | None = None
     error: str | None = None
 
 
@@ -1145,12 +1199,12 @@ class PipelineManager:
             spec_name=pipeline.spec.name,
             phase=pipeline.phase,
             outcome=pipeline.outcome,
-            stop_requested=pipeline.stop_requested,
+            stop_mode=pipeline.stop_mode,
             done=pipeline.done,
             created_at=record.created_at,
             started_at=pipeline.started_at,
             finished_at=pipeline.finished_at,
-            stop_requested_at=pipeline.stop_requested_at,
+            stop_mode_requested_at=pipeline.stop_mode_requested_at,
             error=str(pipeline.error) if pipeline.error is not None else None,
         )
 
@@ -1265,6 +1319,20 @@ class PipelineManager:
             if record.pipeline.phase is PipelinePhase.CREATED:
                 raise PipelineNotStarted(run_id)
             record.pipeline.request_stop()
+
+    def request_drain(self, run_id: str) -> RunInfo:
+        """Request drain mode for a running run and return its snapshot."""
+        with self._lock:
+            self._reconcile_runs()
+            record = self._runs.get(run_id)
+            if record is None:
+                raise PipelineRunNotFound(run_id)
+            if record.pipeline.phase is PipelinePhase.TERMINATED:
+                raise PipelineRunCompleted(run_id)
+            if record.pipeline.phase is PipelinePhase.CREATED:
+                raise PipelineNotStarted(run_id)
+            record.pipeline.request_drain()
+            return self._run_info_from_record(run_id, record)
 
     def wait(
         self,
@@ -1436,6 +1504,17 @@ class PipelineManager:
         record.pipeline.wait(timeout=timeout, raise_on_error=False)
         with self._lock:
             return self._run_info_from_record(run_id, record)
+
+    def drain(
+        self,
+        run_id: str,
+        *,
+        timeout: float | None = None,
+        raise_on_error: bool = True,
+    ) -> RunInfo:
+        """Request drain mode and wait for run termination."""
+        self.request_drain(run_id)
+        return self.wait(run_id, timeout=timeout, raise_on_error=raise_on_error)
 
     def discard_completed(self, older_than: float | None = None) -> int:
         with self._lock:

@@ -16,6 +16,7 @@ from inference_pipeline.pipeline import (
     PipelineRunActive,
     PipelineRunCompleted,
     PipelineRunNotFound,
+    PipelineStopMode,
     ResourceLimitExceeded,
     RunInfo,
 )
@@ -121,6 +122,30 @@ def test_manager_request_stop_then_wait_transitions_to_stopped() -> None:
 
     assert stopped.phase is PipelinePhase.TERMINATED
     assert stopped.outcome is PipelineOutcome.STOPPED
+    assert stopped.stop_mode is PipelineStopMode.IMMEDIATE
+
+
+def test_manager_request_drain_then_wait_transitions_to_succeeded() -> None:
+    manager = PipelineManager()
+    run = manager.start(_runtime_spec())
+
+    draining = manager.request_drain(run.run_id)
+    done = manager.wait(run.run_id)
+
+    assert draining.stop_mode is PipelineStopMode.DRAIN
+    assert done.phase is PipelinePhase.TERMINATED
+    assert done.outcome is PipelineOutcome.SUCCEEDED
+
+
+def test_manager_drain_requests_and_waits() -> None:
+    manager = PipelineManager()
+    run = manager.start(_runtime_spec())
+
+    done = manager.drain(run.run_id)
+
+    assert done.phase is PipelinePhase.TERMINATED
+    assert done.stop_mode is PipelineStopMode.DRAIN
+    assert done.outcome is PipelineOutcome.SUCCEEDED
 
 
 def test_manager_request_stop_rejects_not_started_run() -> None:
@@ -190,7 +215,7 @@ def test_manager_run_info_reports_phase_outcome_and_flags() -> None:
     assert isinstance(info_created, RunInfo)
     assert info_created.phase is PipelinePhase.CREATED
     assert info_created.outcome is None
-    assert info_created.stop_requested is False
+    assert info_created.stop_mode is PipelineStopMode.NONE
     assert info_created.done is False
 
     manager.start_run(created.run_id)
@@ -200,11 +225,11 @@ def test_manager_run_info_reports_phase_outcome_and_flags() -> None:
     info_done = manager.run_info(created.run_id)
     assert info_done.phase is PipelinePhase.TERMINATED
     assert info_done.outcome is PipelineOutcome.STOPPED
-    assert info_done.stop_requested is True
+    assert info_done.stop_mode is PipelineStopMode.IMMEDIATE
     assert info_done.done is True
     assert info_done.started_at is not None
     assert info_done.finished_at is not None
-    assert info_done.stop_requested_at is not None
+    assert info_done.stop_mode_requested_at is not None
 
 
 def test_manager_runs_by_phase_and_outcome() -> None:

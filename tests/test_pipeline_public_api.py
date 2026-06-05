@@ -9,6 +9,7 @@ def test_pipeline_types_are_exported_from_package_root() -> None:
     assert hasattr(inference_pipeline, "PipelineSpec")
     assert hasattr(inference_pipeline, "PipelinePhase")
     assert hasattr(inference_pipeline, "PipelineOutcome")
+    assert hasattr(inference_pipeline, "PipelineStopMode")
     assert hasattr(inference_pipeline, "StreamBuilder")
     assert hasattr(inference_pipeline, "SourceStepSpec")
     assert hasattr(inference_pipeline, "ProcessorStepSpec")

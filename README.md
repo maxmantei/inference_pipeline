@@ -14,13 +14,14 @@ internal records.
 - `run(spec) -> RunInfo`
 - `wait(run_id, timeout=None, raise_on_error=True) -> RunInfo`
 - `cancel(run_id, timeout=None) -> RunInfo`
+- `request_drain(run_id) -> RunInfo`
+- `drain(run_id, timeout=None, raise_on_error=True) -> RunInfo`
 
 `RunInfo` contains immutable lifecycle/observability fields:
 
 - `run_id`, `spec_name`
-- `phase`, `outcome`
-- `stop_requested`, `done`
-- `created_at`, `started_at`, `finished_at`, `stop_requested_at`
+- `phase`, `outcome`, `stop_mode`, `done`
+- `created_at`, `started_at`, `finished_at`, `stop_mode_requested_at`
 - `error`
 
 ## Development

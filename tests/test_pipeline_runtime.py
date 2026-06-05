@@ -20,6 +20,7 @@ from inference_pipeline.pipeline import (
     PipelineBuilder,
     PipelineOutcome,
     PipelinePhase,
+    PipelineStopMode,
 )
 from inference_pipeline.stages import ConsumerStage, ProcessorStage, ProducerStage
 
@@ -368,14 +369,26 @@ def test_pipeline_request_stop_is_idempotent() -> None:
 
     pipeline.start()
     pipeline.request_stop()
-    first_requested_at = pipeline.stop_requested_at
+    first_requested_at = pipeline.stop_mode_requested_at
     pipeline.request_stop()
     pipeline.wait()
 
-    assert pipeline.stop_requested is True
+    assert pipeline.stop_mode is PipelineStopMode.IMMEDIATE
     assert first_requested_at is not None
-    assert pipeline.stop_requested_at == first_requested_at
+    assert pipeline.stop_mode_requested_at == first_requested_at
     assert pipeline.outcome is PipelineOutcome.STOPPED
+
+
+def test_pipeline_request_drain_finishes_as_succeeded() -> None:
+    pipeline = _runtime_pipeline()
+
+    pipeline.start()
+    pipeline.request_drain()
+    pipeline.wait()
+
+    assert pipeline.phase is PipelinePhase.TERMINATED
+    assert pipeline.stop_mode is PipelineStopMode.DRAIN
+    assert pipeline.outcome is PipelineOutcome.SUCCEEDED
 
 
 def test_pipeline_failure_transitions_to_failed() -> None:
