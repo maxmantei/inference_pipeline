@@ -78,18 +78,18 @@ def test_manager_create_run_registers_created_pipeline() -> None:
 
     run = manager.create_run(_runtime_spec())
 
-    assert run.pipeline.phase is PipelinePhase.CREATED
-    assert manager.created == {"runtime-run-1": run.pipeline}
+    assert run.phase is PipelinePhase.CREATED
+    assert set(manager.created) == {"runtime-run-1"}
 
 
 def test_manager_start_run_moves_to_running_view() -> None:
     manager = PipelineManager()
     run = manager.create_run(_runtime_spec())
 
-    manager.start_run(run.run_id)
+    started = manager.start_run(run.run_id)
 
-    assert run.pipeline.phase is PipelinePhase.RUNNING
-    assert manager.running == {run.run_id: run.pipeline}
+    assert started.phase is PipelinePhase.RUNNING
+    assert set(manager.running) == {run.run_id}
 
 
 def test_manager_run_completes_pipeline() -> None:
@@ -97,9 +97,9 @@ def test_manager_run_completes_pipeline() -> None:
 
     run = manager.run(_runtime_spec())
 
-    assert run.pipeline.phase is PipelinePhase.TERMINATED
-    assert run.pipeline.outcome is PipelineOutcome.SUCCEEDED
-    assert manager.completed == {run.run_id: run.pipeline}
+    assert run.phase is PipelinePhase.TERMINATED
+    assert run.outcome is PipelineOutcome.SUCCEEDED
+    assert set(manager.completed) == {run.run_id}
 
 
 def test_manager_wait_is_repeatable_for_terminated_runs() -> None:
@@ -108,8 +108,8 @@ def test_manager_wait_is_repeatable_for_terminated_runs() -> None:
 
     again = manager.wait(run.run_id)
 
-    assert again is run
-    assert run.pipeline.outcome is PipelineOutcome.SUCCEEDED
+    assert again.run_id == run.run_id
+    assert again.outcome is PipelineOutcome.SUCCEEDED
 
 
 def test_manager_request_stop_then_wait_transitions_to_stopped() -> None:
@@ -117,10 +117,10 @@ def test_manager_request_stop_then_wait_transitions_to_stopped() -> None:
     run = manager.start(_runtime_spec())
 
     manager.request_stop(run.run_id)
-    manager.wait(run.run_id)
+    stopped = manager.wait(run.run_id)
 
-    assert run.pipeline.phase is PipelinePhase.TERMINATED
-    assert run.pipeline.outcome is PipelineOutcome.STOPPED
+    assert stopped.phase is PipelinePhase.TERMINATED
+    assert stopped.outcome is PipelineOutcome.STOPPED
 
 
 def test_manager_request_stop_rejects_not_started_run() -> None:
@@ -143,10 +143,10 @@ def test_manager_cancel_requests_stop_and_waits() -> None:
     manager = PipelineManager()
     run = manager.start(_runtime_spec())
 
-    manager.cancel(run.run_id)
+    cancelled = manager.cancel(run.run_id)
 
-    assert run.pipeline.phase is PipelinePhase.TERMINATED
-    assert run.pipeline.outcome is PipelineOutcome.STOPPED
+    assert cancelled.phase is PipelinePhase.TERMINATED
+    assert cancelled.outcome is PipelineOutcome.STOPPED
     assert run.run_id in manager.completed
 
 

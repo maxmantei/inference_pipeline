@@ -2,6 +2,27 @@
 
 Utilities for ML/DL threaded pipelines in inference services.
 
+## Runtime API
+
+`PipelineManager` lifecycle methods return `RunInfo` snapshots rather than
+internal records.
+
+- `create_run(spec) -> RunInfo`
+- `start_run(run_id) -> RunInfo`
+- `start(spec) -> RunInfo`
+- `run_by_id(run_id) -> RunInfo`
+- `run(spec) -> RunInfo`
+- `wait(run_id, timeout=None, raise_on_error=True) -> RunInfo`
+- `cancel(run_id, timeout=None) -> RunInfo`
+
+`RunInfo` contains immutable lifecycle/observability fields:
+
+- `run_id`, `spec_name`
+- `phase`, `outcome`
+- `stop_requested`, `done`
+- `created_at`, `started_at`, `finished_at`, `stop_requested_at`
+- `error`
+
 ## Development
 
 Install project dependencies:
