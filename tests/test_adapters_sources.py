@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import pytest
 
@@ -13,11 +13,10 @@ from inference_pipeline.configs import BaseProducerConfig
 class _CountingSource(ManagedSourceAdapter[int, BaseProducerConfig]):
     def __init__(
         self,
-        config: BaseProducerConfig = BaseProducerConfig(
-            out_maxsize=8, out_timeout=0.01
-        ),
+        config: BaseProducerConfig = BaseProducerConfig(out_maxsize=8, out_timeout=0.1),
     ) -> None:
         super().__init__(config=config)
+        self.numbers = list(range(0, 10_000))
         self.start_calls = 0
         self.stop_calls = 0
 
@@ -27,15 +26,20 @@ class _CountingSource(ManagedSourceAdapter[int, BaseProducerConfig]):
     def _stop_impl(self) -> None:
         self.stop_calls += 1
 
+    def produce(self, stop: threading.Event | None = None) -> Iterator[int]:
+        for number in self.numbers:
+            if stop is not None and stop.is_set():
+                break
+            yield number
+
 
 class _FailingStopSource(ManagedSourceAdapter[int, BaseProducerConfig]):
     def __init__(
         self,
-        config: BaseProducerConfig = BaseProducerConfig(
-            out_maxsize=8, out_timeout=0.01
-        ),
+        config: BaseProducerConfig = BaseProducerConfig(out_maxsize=8, out_timeout=0.01),
     ) -> None:
         super().__init__(config=config)
+        self.numbers = [1, 2, 3]
         self.start_calls = 0
         self.stop_calls = 0
 
@@ -46,15 +50,17 @@ class _FailingStopSource(ManagedSourceAdapter[int, BaseProducerConfig]):
         self.stop_calls += 1
         raise RuntimeError("stop failed")
 
+    def produce(self, stop: threading.Event | None = None) -> Iterator[int]:
+        yield from self.numbers
+
 
 class _FailingStartSource(ManagedSourceAdapter[int, BaseProducerConfig]):
     def __init__(
         self,
-        config: BaseProducerConfig = BaseProducerConfig(
-            out_maxsize=8, out_timeout=0.01
-        ),
+        config: BaseProducerConfig = BaseProducerConfig(out_maxsize=8, out_timeout=0.01),
     ) -> None:
         super().__init__(config=config)
+        self.numbers = [1, 2, 3]
         self.start_calls = 0
         self.stop_calls = 0
 
@@ -65,15 +71,17 @@ class _FailingStartSource(ManagedSourceAdapter[int, BaseProducerConfig]):
     def _stop_impl(self) -> None:
         self.stop_calls += 1
 
+    def produce(self, stop: threading.Event | None = None) -> Iterator[int]:
+        yield from self.numbers
+
 
 class _BlockingStartSource(ManagedSourceAdapter[int, BaseProducerConfig]):
     def __init__(
         self,
-        config: BaseProducerConfig = BaseProducerConfig(
-            out_maxsize=8, out_timeout=0.01
-        ),
+        config: BaseProducerConfig = BaseProducerConfig(out_maxsize=8, out_timeout=0.01),
     ) -> None:
         super().__init__(config=config)
+        self.numbers = [1, 2, 3]
         self.start_calls = 0
         self.stop_calls = 0
         self.entered_start = threading.Event()
@@ -86,6 +94,9 @@ class _BlockingStartSource(ManagedSourceAdapter[int, BaseProducerConfig]):
 
     def _stop_impl(self) -> None:
         self.stop_calls += 1
+
+    def produce(self, stop: threading.Event | None = None) -> Iterator[int]:
+        yield from self.numbers
 
 
 def wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> bool:

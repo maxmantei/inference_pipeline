@@ -89,16 +89,26 @@ class _CollectInt(ConsumerStage[int, BaseConsumerConfig]):
 class _RecordingSourceAdapter(ManagedSourceAdapter[int, BaseProducerConfig]):
     def __init__(self, *, config: BaseProducerConfig) -> None:
         super().__init__(config=config)
+        self._numbers: list[int] | None = None
         self.start_calls = 0
         self.stop_calls = 0
 
+    @property
+    def numbers(self) -> list[int]:
+        if self._numbers is None:
+            raise RuntimeError("Source not started")
+        return self._numbers
+
     def _start_impl(self) -> None:
         self.start_calls += 1
-        for value in [1, 2, 3]:
-            self.output.put(value)
+        self._numbers = [1, 2, 3]
 
     def _stop_impl(self) -> None:
         self.stop_calls += 1
+        self._numbers = None
+
+    def produce(self, stop: threading.Event | None = None) -> Iterator[int]:
+        yield from self.numbers
 
 
 class _RecordingSinkAdapter(ManagedSinkAdapter[str, BaseConsumerConfig]):

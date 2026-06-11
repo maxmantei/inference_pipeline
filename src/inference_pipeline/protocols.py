@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Protocol
 
 from inference_pipeline.buffer import BufferQ
@@ -126,6 +126,10 @@ class ProducerLike[T](Protocol):
         join_timeout: float = 5.0,
     ) -> ThreadTask:
         """Return a ``ThreadTask`` that runs this producer in a worker thread."""
+        ...
+
+    def produce(self, stop: threading.Event | None = None) -> Iterable[T]:
+        """Yield produced items until completion or optional stop signal."""
         ...
 
 
