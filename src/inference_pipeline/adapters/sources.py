@@ -1,12 +1,12 @@
 """Abstract source-adapter interfaces for queue-based pipeline ingestion."""
 
-from __future__ import annotations
-
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from types import TracebackType
 from typing import Self
 
+from inference_pipeline.adapters.utils import OrStopEvent
 from inference_pipeline.buffer import BufferQ
 from inference_pipeline.protocols import BaseProducerConfigI
 from inference_pipeline.runtime import ThreadTask
@@ -96,9 +96,7 @@ class ManagedSourceAdapter[T, ConfT: BaseProducerConfigI](SourceAdapter[T, ConfT
     def __init__(self, *, config: ConfT) -> None:
         """Create a managed source with a bounded output queue."""
         self.config = config
-        self._output = BufferQ[T](
-            maxsize=config.out_maxsize, default_timeout=config.out_timeout
-        )
+        self._output = BufferQ[T](maxsize=config.out_maxsize, default_timeout=config.out_timeout)
         self._state_lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
         self._running = False
@@ -163,12 +161,12 @@ class ManagedSourceAdapter[T, ConfT: BaseProducerConfigI](SourceAdapter[T, ConfT
         The method enters source context management and blocks until either the
         external ``stop`` event is set or this adapter begins shutting down.
         """
+
+        effective_stop = self._shutdown_event if stop is None else OrStopEvent(self._shutdown_event, stop)
+
         with self:
-            while True:
-                if self._shutdown_event.wait(timeout=0.1):
-                    return
-                if stop is not None and stop.is_set():
-                    return
+            for item in self.produce(stop=effective_stop):
+                self.output.put(item)
 
     def threaded(
         self,
@@ -189,6 +187,11 @@ class ManagedSourceAdapter[T, ConfT: BaseProducerConfigI](SourceAdapter[T, ConfT
     @abstractmethod
     def _start_impl(self) -> None:
         """Subclass hook containing concrete startup logic."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def produce(self, stop: threading.Event | None = None) -> Iterator[T]:
+        """Subclass hook containing concrete item production logic."""
         raise NotImplementedError
 
     @abstractmethod

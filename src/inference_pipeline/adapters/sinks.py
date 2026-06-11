@@ -7,21 +7,10 @@ from abc import ABC, abstractmethod
 from types import TracebackType
 from typing import Self
 
+from inference_pipeline.adapters.utils import OrStopEvent
 from inference_pipeline.buffer import BufferQ
 from inference_pipeline.protocols import BaseConfigI
 from inference_pipeline.runtime import ThreadTask
-
-
-class _OrStopEvent(threading.Event):
-    """Read-only event that reports set when either source event is set."""
-
-    def __init__(self, left: threading.Event, right: threading.Event) -> None:
-        super().__init__()
-        self._left = left
-        self._right = right
-
-    def is_set(self) -> bool:
-        return self._left.is_set() or self._right.is_set()
 
 
 class SinkAdapter[T, ConfT: BaseConfigI](ABC):
@@ -151,11 +140,7 @@ class ManagedSinkAdapter[T, ConfT: BaseConfigI](SinkAdapter[T, ConfT], ABC):
         Consumption stops when either the optional external stop event is set or
         this sink is stopped via ``stop()``.
         """
-        effective_stop = (
-            self._shutdown_event
-            if stop is None
-            else _OrStopEvent(self._shutdown_event, stop)
-        )
+        effective_stop = self._shutdown_event if stop is None else OrStopEvent(self._shutdown_event, stop)
 
         with self:
             for item in input_q.iter_until_closed(stop=effective_stop):
