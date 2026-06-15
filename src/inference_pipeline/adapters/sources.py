@@ -45,6 +45,11 @@ class SourceAdapter[T, ConfT: BaseProducerConfigI](ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def produce(self, stop: threading.Event | None = None) -> Iterator[T]:
+        """Yield produced items until completion or optional stop signal."""
+        raise NotImplementedError
+
+    @abstractmethod
     def run(self, stop: threading.Event | None = None) -> None:
         """Run source lifecycle in blocking mode until an optional stop signal."""
         raise NotImplementedError
